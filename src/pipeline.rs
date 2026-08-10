@@ -7,6 +7,8 @@ use chrono::{DateTime, Utc};
 use flate2::read::MultiGzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::process::Command;
@@ -366,7 +368,7 @@ fn choose_auto_backend(
 
 /// Randomly sample `n_reads` from a (possibly gzipped) FASTQ file into `dst`.
 /// Prefers `seqtk sample` when available for unbiased reservoir sampling;
-/// falls back to reading the first `n_reads` otherwise.
+/// falls back to an in-memory reservoir sample otherwise.
 fn sample_fastq_reads(src: &Path, dst: &Path, n_reads: u64) -> Result<()> {
     if which::which("seqtk").is_ok() {
         let output = std::process::Command::new("seqtk")
@@ -394,21 +396,20 @@ fn sample_fastq_reads(src: &Path, dst: &Path, n_reads: u64) -> Result<()> {
         return Ok(());
     }
 
-    // Fallback: read first n_reads (acceptable if input is already shuffled).
+    // Fallback: reservoir sampling (one pass, unbiased).
     let mut reader = open_fastq_reader(src)?;
     let file = std::fs::File::create(dst)
         .map_err(|e| RustycleanError::ToolExecution(format!("failed to create survey FASTQ {}: {}", dst.display(), e)))?;
     let mut writer = GzEncoder::new(BufWriter::new(file), Compression::fast());
 
+    let mut reservoir: Vec<Vec<u8>> = Vec::with_capacity(n_reads as usize);
     let mut record = Vec::with_capacity(1024);
-    let mut line_count = 0;
-    let mut read_count = 0u64;
+    let mut line_count = 0u64;
+    let mut read_index = 0u64;
     let mut line = Vec::new();
+    let mut rng = StdRng::seed_from_u64(42);
 
     loop {
-        if read_count >= n_reads {
-            break;
-        }
         line.clear();
         let n = reader.read_until(b'\n', &mut line)
             .map_err(|e| RustycleanError::ToolExecution(format!("survey read error: {}", e)))?;
@@ -419,12 +420,23 @@ fn sample_fastq_reads(src: &Path, dst: &Path, n_reads: u64) -> Result<()> {
         line_count += 1;
 
         if line_count == 4 {
-            writer.write_all(&record)
-                .map_err(|e| RustycleanError::ToolExecution(format!("survey write error: {}", e)))?;
+            if read_index < n_reads {
+                reservoir.push(record.clone());
+            } else {
+                let j = rng.gen_range(0..=read_index);
+                if j < n_reads {
+                    reservoir[j as usize] = record.clone();
+                }
+            }
             record.clear();
             line_count = 0;
-            read_count += 1;
+            read_index += 1;
         }
+    }
+
+    for rec in reservoir {
+        writer.write_all(&rec)
+            .map_err(|e| RustycleanError::ToolExecution(format!("survey write error: {}", e)))?;
     }
 
     writer.finish()
