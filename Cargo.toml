@@ -21,3 +21,4 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 which = "7"
 num_cpus = "1"
 dashmap = "6"
+flate2 = "1"

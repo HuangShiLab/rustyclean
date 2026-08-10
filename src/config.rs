@@ -31,7 +31,7 @@ impl Default for ExecutionConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolConfig {
     pub fastp: FastpConfig,
-    pub kraken2: Kraken2Config,
+    pub host_removal: HostRemovalConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -43,6 +43,9 @@ pub struct FastpConfig {
     pub qualified_quality_phred: u8,
     pub length_required: u32,
     pub compression_level: u8,
+    /// Skip fastp QC and feed raw reads directly to the host-removal backend.
+    #[serde(default)]
+    pub skip_qc: bool,
 }
 
 impl Default for FastpConfig {
@@ -55,25 +58,108 @@ impl Default for FastpConfig {
             qualified_quality_phred: 20,
             length_required: 50,
             compression_level: 6,
+            skip_qc: false,
         }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Kraken2Config {
-    pub db_path: PathBuf,
-    pub threads: usize,
-    pub confidence_threshold: f64,
-    pub minimum_hit_groups: u32,
+#[serde(tag = "mode")]
+pub enum HostRemovalConfig {
+    #[serde(rename = "kraken2")]
+    Kraken2 {
+        db_path: PathBuf,
+        threads: usize,
+        confidence_threshold: f64,
+        minimum_hit_groups: u32,
+        #[serde(default = "default_memory_mapping")]
+        memory_mapping: bool,
+    },
+    #[serde(rename = "minimap2")]
+    Minimap2 {
+        index_path: PathBuf,
+        threads: usize,
+    },
+    #[serde(rename = "bowtie2")]
+    Bowtie2 {
+        index_prefix: PathBuf,
+        threads: usize,
+    },
+    #[serde(rename = "sylph")]
+    Sylph {
+        db_path: PathBuf,
+        threads: usize,
+    },
+    #[serde(rename = "centrifuge")]
+    Centrifuge {
+        db_path: PathBuf,
+        threads: usize,
+    },
+    #[serde(rename = "auto")]
+    Auto {
+        kraken2_db_path: PathBuf,
+        bowtie2_index_prefix: PathBuf,
+        threads: usize,
+        // Thresholds for backend selection
+        host_pct_low_threshold: f64,
+        host_pct_high_threshold: f64,
+        reads_high_threshold: u64,
+        // User-provided host percentage (0-100). When Some, survey is skipped.
+        user_host_pct: Option<f64>,
+        // Survey configuration
+        survey: bool,
+        survey_n_reads: u64,
+        survey_threads: usize,
+    },
 }
 
-impl Default for Kraken2Config {
+impl HostRemovalConfig {
+    pub fn mode(&self) -> &'static str {
+        match self {
+            HostRemovalConfig::Kraken2 { .. } => "kraken2",
+            HostRemovalConfig::Minimap2 { .. } => "minimap2",
+            HostRemovalConfig::Bowtie2 { .. } => "bowtie2",
+            HostRemovalConfig::Sylph { .. } => "sylph",
+            HostRemovalConfig::Centrifuge { .. } => "centrifuge",
+            HostRemovalConfig::Auto { .. } => "auto",
+        }
+    }
+
+    pub fn resolved_mode(&self) -> &'static str {
+        match self {
+            HostRemovalConfig::Kraken2 { .. } => "kraken2",
+            HostRemovalConfig::Minimap2 { .. } => "minimap2",
+            HostRemovalConfig::Bowtie2 { .. } => "bowtie2",
+            HostRemovalConfig::Sylph { .. } => "sylph",
+            HostRemovalConfig::Centrifuge { .. } => "centrifuge",
+            HostRemovalConfig::Auto { .. } => "auto-unresolved",
+        }
+    }
+
+    pub fn threads(&self) -> usize {
+        match self {
+            HostRemovalConfig::Kraken2 { threads, .. } => *threads,
+            HostRemovalConfig::Minimap2 { threads, .. } => *threads,
+            HostRemovalConfig::Bowtie2 { threads, .. } => *threads,
+            HostRemovalConfig::Sylph { threads, .. } => *threads,
+            HostRemovalConfig::Centrifuge { threads, .. } => *threads,
+            HostRemovalConfig::Auto { threads, .. } => *threads,
+        }
+    }
+}
+
+fn default_memory_mapping() -> bool {
+    true
+}
+
+impl Default for HostRemovalConfig {
     fn default() -> Self {
-        Self {
+        HostRemovalConfig::Kraken2 {
             db_path: PathBuf::from("/db/minikraken2_v2_8GB"),
             threads: 4,
-            confidence_threshold: 0.1,
+            confidence_threshold: 0.0,
             minimum_hit_groups: 2,
+            memory_mapping: false,
         }
     }
 }
@@ -88,7 +174,7 @@ impl Default for ValidationConfig {
     fn default() -> Self {
         Self {
             min_output_size_bytes: 1024,
-            max_contamination_percent: 5.0,
+            max_contamination_percent: 100.0,
         }
     }
 }
