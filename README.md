@@ -25,6 +25,20 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 | `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
 | `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2` | General use; balances speed and accuracy without manual tuning |
 
+## Databases
+
+RustyClean is not restricted to a single host reference. You can point any backend to a custom database or index built from the host genome of interest. Common use cases include human (e.g. GRCh38, T2T-CHM13), mouse, rat, pig, rice, monkey, and other plant or animal host genomes.
+
+| Backend | Database / index type | How to specify |
+|---------|----------------------|----------------|
+| `kraken2` | Pre-built Kraken2 database containing the host taxon | `--kraken2-db /path/to/kraken2_db` |
+| `bowtie2` | Bowtie2 index prefix (files `{prefix}.1.bt2`, `{prefix}.2.bt2`, ...) | `--host-index /path/to/bowtie2_index_prefix` |
+| `minimap2` | Minimap2 index file (`.mmi`) | `--host-index /path/to/index.mmi` |
+| `centrifuge` | Centrifuge index prefix (files `{prefix}.1.cf`, `{prefix}.2.cf`, ...) | `--host-index /path/to/centrifuge_index_prefix` |
+| `auto` | Both a Kraken2 database and a Bowtie2 index prefix are required | `--kraken2-db ...` and `--host-index ...` |
+
+For `kraken2` and `centrifuge`, the database only needs to contain the host lineage (e.g. *Homo sapiens*, taxid 9606). For `bowtie2` and `minimap2`, build the index directly from the host reference FASTA. This makes RustyClean applicable across diverse host species and metagenome types (saliva, vaginal, gut, plant root, etc.).
+
 ## Prerequisites
 
 Install the following tools and ensure they are available in `$PATH`. Only the tools required by your chosen backend need to be installed.
