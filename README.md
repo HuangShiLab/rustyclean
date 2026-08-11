@@ -1,9 +1,12 @@
 # RustyClean
 
-A high-performance metagenome QC and host removal pipeline written in Rust. RustyClean chains [fastp](https://github.com/OpenGene/fastp) (quality control & adapter trimming) and [Kraken2](https://github.com/DerrickWood/kraken2) (taxonomic classification & host removal) into a streamlined workflow for metagenomic sequencing data.
+A high-performance metagenome QC and host removal pipeline written in Rust. RustyClean chains [fastp](https://github.com/OpenGene/fastp) (quality control & adapter trimming) with a choice of host-removal backends into a streamlined workflow for metagenomic sequencing data.
 
 ## Features
 
+- **Multiple host-removal backends** -- Kraken2, minimap2, Bowtie2, Centrifuge, or adaptive `auto` mode
+- **AUTO mode** -- surveys a small subset of reads and automatically selects Bowtie2 (low-host samples) or Kraken2 (large, high-host samples) for best performance
+- **`--skip-qc` mode** -- bypass fastp and feed raw reads directly to the host-removal backend, useful for already-QC'd data or fair benchmarking of host removal only
 - **Dual input mode** -- direct FASTQ(.gz) file input or batch processing via sample list
 - **Single-end & paired-end** -- automatically adapts the pipeline based on input
 - **Parallel processing** -- concurrent sample processing with configurable worker count
@@ -12,12 +15,39 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 - **Validation** -- checks output file size and host contamination rate after processing
 - **Graceful shutdown** -- Ctrl-C cleanly cancels in-progress work
 
+## Host-removal backends
+
+| Backend | Description | Best for |
+|---------|-------------|----------|
+| `kraken2` | k-mer based taxonomic classification; removes reads classified as *Homo sapiens* (taxid 9606) | Large, high-host samples; when microbial context is also useful |
+| `bowtie2` | Short-read alignment against a host reference index | Low-host samples; fastest when host fraction is small |
+| `minimap2` | Long- or short-read alignment (`-x sr`) | Long reads or when a minimap2 index is preferred |
+| `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
+| `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2` | General use; balances speed and accuracy without manual tuning |
+
+## Databases
+
+RustyClean is not restricted to a single host reference. You can point any backend to a custom database or index built from the host genome of interest. Common use cases include human (e.g. GRCh38, T2T-CHM13), mouse, rat, pig, rice, monkey, and other plant or animal host genomes.
+
+| Backend | Database / index type | How to specify |
+|---------|----------------------|----------------|
+| `kraken2` | Pre-built Kraken2 database containing the host taxon | `--kraken2-db /path/to/kraken2_db` |
+| `bowtie2` | Bowtie2 index prefix (files `{prefix}.1.bt2`, `{prefix}.2.bt2`, ...) | `--host-index /path/to/bowtie2_index_prefix` |
+| `minimap2` | Minimap2 index file (`.mmi`) | `--host-index /path/to/index.mmi` |
+| `centrifuge` | Centrifuge index prefix (files `{prefix}.1.cf`, `{prefix}.2.cf`, ...) | `--host-index /path/to/centrifuge_index_prefix` |
+| `auto` | Both a Kraken2 database and a Bowtie2 index prefix are required | `--kraken2-db ...` and `--host-index ...` |
+
+For `kraken2` and `centrifuge`, the database only needs to contain the host lineage (e.g. *Homo sapiens*, taxid 9606). For `bowtie2` and `minimap2`, build the index directly from the host reference FASTA. This makes RustyClean applicable across diverse host species and metagenome types (saliva, vaginal, gut, plant root, etc.).
+
 ## Prerequisites
 
-Install the following tools and ensure they are available in `$PATH`:
+Install the following tools and ensure they are available in `$PATH`. Only the tools required by your chosen backend need to be installed.
 
-- [fastp](https://github.com/OpenGene/fastp) (>= 0.23)
-- [Kraken2](https://github.com/DerrickWood/kraken2) (>= 2.1) with a pre-built database
+- [fastp](https://github.com/OpenGene/fastp) (>= 0.23) -- required unless `--skip-qc` is used
+- [Kraken2](https://github.com/DerrickWood/kraken2) (>= 2.1) with a pre-built database -- for `--host-removal-mode kraken2` or `auto`
+- [Bowtie2](https://github.com/BenLangmead/bowtie2) (>= 2.4) and [samtools](http://www.htslib.org/) -- for `--host-removal-mode bowtie2` or `auto`
+- [minimap2](https://github.com/lh3/minimap2) -- for `--host-removal-mode minimap2`
+- [Centrifuge](https://ccb.jhu.edu/software/centrifuge/) -- for `--host-removal-mode centrifuge`
 
 ## Installation
 
@@ -32,19 +62,37 @@ cargo build --release
 ## Quick Start
 
 ```bash
-# Single sample, paired-end
+# Single sample, paired-end, default kraken2 mode
 rustyclean --r1 sample_R1.fastq.gz --r2 sample_R2.fastq.gz \
            --kraken2-db /path/to/kraken2_db \
            -o output/
 
-# Single sample, single-end
+# Single sample, single-end, default kraken2 mode
 rustyclean --r1 sample.fastq.gz \
            --kraken2-db /path/to/kraken2_db \
            -o output/
 
+# AUTO mode: adaptively choose bowtie2/kraken2 based on a 100k-read survey
+rustyclean --r1 sample.fastq.gz \
+           --host-removal-mode auto \
+           --kraken2-db /path/to/kraken2_db \
+           --host-index /path/to/bowtie2_index_prefix \
+           --auto-survey \
+           -o output/ -t 8
+
+# Skip QC and run host removal only (fair comparison with tools like Hostile)
+rustyclean --r1 sample.fastq.gz \
+           --host-removal-mode bowtie2 \
+           --host-index /path/to/bowtie2_index_prefix \
+           --skip-qc \
+           -o output/ -t 8
+
 # Batch mode with sample list
 rustyclean --samples list.txt \
+           --host-removal-mode auto \
            --kraken2-db /path/to/kraken2_db \
+           --host-index /path/to/bowtie2_index_prefix \
+           --auto-survey \
            -o output/ -w 4 -t 8
 ```
 
@@ -68,44 +116,82 @@ sampleC        /data/sampleC.fastq.gz
 Usage: rustyclean [OPTIONS]
 
 Options:
-      --r1 <R1>                  Forward reads (R1) fastq(.gz) file
-      --r2 <R2>                  Reverse reads (R2) fastq(.gz) file (paired-end)
-  -s, --samples <SAMPLES>        Sample list file (TSV)
-  -o, --output <OUTPUT>          Output directory [default: rustyclean_output]
-      --kraken2-db <KRAKEN2_DB>  Kraken2 database path
-  -c, --config <CONFIG>          Configuration file (TOML)
-      --checkpoint-dir <DIR>     Checkpoint directory [default: .rustyclean_checkpoints]
-  -w, --workers <WORKERS>        Number of parallel workers
-  -t, --threads <THREADS>        Number of threads per tool (fastp/kraken2)
-      --resume                   Resume from previous checkpoints
-      --clean                    Clean completed checkpoints after run
-      --dry-run                  Validate inputs without processing
-  -h, --help                     Print help
-  -V, --version                  Print version
+      --r1 <R1>                        Forward reads (R1) fastq(.gz) file
+      --r2 <R2>                        Reverse reads (R2) fastq(.gz) file (paired-end)
+  -s, --samples <SAMPLES>              Sample list file (TSV)
+  -o, --output <OUTPUT>                Output directory [default: rustyclean_output]
+      --host-removal-mode <MODE>       Host-removal backend: kraken2, minimap2, bowtie2,
+                                       centrifuge, auto [default: kraken2]
+      --host-pct <PCT>                 Expected host contamination % (0-100); used by auto mode
+      --auto-survey                    Enable lightweight survey for auto mode
+      --auto-survey-nreads <N>         Reads to survey [default: 100000]
+      --auto-survey-threads <N>        Threads for auto survey [default: 2]
+      --auto-low-threshold <PCT>       Low-host threshold for auto mode [default: 10.0]
+      --auto-high-threshold <PCT>      High-host threshold for auto mode [default: 30.0]
+      --auto-reads-threshold <N>       Large-sample read threshold for auto mode [default: 20000000]
+      --kraken2-db <KRAKEN2_DB>        Kraken2 database path
+      --kraken2-memory-mapping         Use Kraken2 --memory-mapping
+      --host-index <PATH>              Host index path (minimap2 .mmi, bowtie2 prefix,
+                                       centrifuge prefix, sylph .syldb, or auto survey index)
+      --max-contamination <PCT>        Max allowed host contamination in output [default: 100.0]
+      --skip-qc                        Skip fastp QC and use raw reads for host removal
+  -c, --config <CONFIG>                Configuration file (TOML)
+      --checkpoint-dir <DIR>           Checkpoint directory [default: .rustyclean_checkpoints]
+  -w, --workers <WORKERS>              Number of parallel workers
+  -t, --threads <THREADS>              Number of threads per tool
+      --resume                         Resume from previous checkpoints
+      --clean                          Clean completed checkpoints after run
+      --dry-run                        Validate inputs without processing
+  -h, --help                           Print help
+  -V, --version                        Print version
 ```
+
 ## Pipeline
+
+### Default (QC + host removal)
 
 ```
 Input FASTQ(.gz)
       |
       v
   +---------+
-  |  fastp   |  Quality control, adapter trimming, read filtering
+  |  fastp  |  Quality control, adapter trimming, read filtering
   +---------+
       |
       v
-  +---------+
-  | kraken2  |  Taxonomic classification, host (human) read removal
-  +---------+
+  +------------------+
+  | host-removal     |  kraken2 / bowtie2 / minimap2 / centrifuge / auto
+  | (selected backend)
+  +------------------+
       |
       v
-  Validation    Check output size & contamination rate
+  Validation           Check output size & contamination rate
       |
       v
-  Clean FASTQ   {sample_id}_clean_R1.fastq.gz [+ _R2.fastq.gz]
+  Clean FASTQ          {sample_id}_clean_R1.fastq.gz [+ _R2.fastq.gz]
+```
+
+### `--skip-qc` (host removal only)
+
+```
+Input FASTQ(.gz)
+      |
+      v
+  +------------------+
+  | host-removal     |  kraken2 / bowtie2 / minimap2 / centrifuge / auto
+  | (selected backend)
+  +------------------+
+      |
+      v
+  Validation
+      |
+      v
+  Clean FASTQ
 ```
 
 ## Output
+
+### Final clean FASTQ
 
 For each sample, the final output is written to the output directory:
 
@@ -117,6 +203,51 @@ output/
   sampleB/
     sampleB_clean_R1.fastq.gz
 ```
+
+### Checkpoint directory
+
+By default RustyClean writes per-sample checkpoints and intermediate files under `.rustyclean_checkpoints/`:
+
+```
+.rustyclean_checkpoints/
+  {sample_id}.json           # Resume checkpoint (pipeline stage, metrics, input hash)
+  work/
+    {sample_id}/
+      fastp.json             # fastp QC report (absent when --skip-qc is used)
+      trimmed_R1.fastq.gz    # fastp-trimmed reads (absent when --skip-qc is used)
+      trimmed_R2.fastq.gz    # paired-end only
+      kraken2.report         # Kraken2 report (kraken2/auto-kraken2 only)
+      kraken2.output.txt     # Per-read Kraken2 classifications
+      ...                    # Backend-specific intermediate files
+```
+
+**Checkpoint JSON** (`{sample_id}.json`) contains:
+- Current pipeline stage (`Pending`, `FastpRunning`, `FastpComplete`, `Kraken2Running`, ...)
+- Input file hash (for resume consistency)
+- `fastp_metrics`: read counts, Q20/Q30, GC content, adapter trimming stats (when QC ran)
+- `kraken2_metrics`: host reads kept, unclassified/kept reads, contamination %, output paths
+- `auto_backend`: backend chosen by `auto` mode (e.g. `bowtie2` or `kraken2`)
+- `validation_result`: pass/fail status, output file size, errors
+
+### Log files
+
+RustyClean prints structured logs to stderr. Redirecting stderr to a file gives a log like:
+
+```
+2024-01-15T08:30:12Z  INFO rustyclean: Loaded 2 sample(s), host-removal mode: auto
+2024-01-15T08:30:13Z  INFO rustyclean::pipeline: auto mode: selected backend sample=sampleA host_pct="45.20" input_reads=30000000 chosen_backend="kraken2"
+2024-01-15T08:35:45Z  INFO rustyclean::pipeline: Sample validated and finalized sample=sampleA unclassified_reads=16500000 human_reads=13500000 contamination="45.00%" auto_backend=Some("kraken2")
+```
+
+Key log fields:
+- `host-removal mode`: the backend requested on the CLI
+- `auto mode: selected backend`: backend chosen by `auto` mode, with estimated host % and input read count
+- `Sample validated and finalized`: final kept reads, removed host reads, and contamination rate
+- `auto_backend`: confirms which backend was actually used
+
+### fastp JSON
+
+When QC is enabled, `fastp.json` inside the checkpoint work directory is the standard fastp report. It contains pre/post-filtering read counts, quality metrics, adapter trimming statistics, and filtering results.
 
 ## License
 

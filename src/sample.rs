@@ -90,20 +90,16 @@ pub async fn parse_sample_list(path: &Path, output_base: &Path) -> Result<Vec<Sa
 }
 
 /// Create a single sample from direct CLI input (--r1, optional --r2).
+///
+/// The sample ID is derived from the parent directory of R1.  This avoids the
+/// common case where every input file is named `reads_R1.fastq.gz` and would
+/// otherwise collide on the generic id "reads".
 pub fn sample_from_paths(r1: PathBuf, r2: Option<PathBuf>, output_base: &Path) -> Result<Sample> {
     let id = r1
-        .file_stem()
+        .parent()
+        .and_then(|p| p.file_name())
         .and_then(|s| s.to_str())
         .unwrap_or("sample")
-        .to_string();
-
-    // Strip common suffixes like _R1, _1, .R1
-    let id = id
-        .trim_end_matches(".fastq")
-        .trim_end_matches(".fq")
-        .trim_end_matches("_R1")
-        .trim_end_matches("_1")
-        .trim_end_matches(".R1")
         .to_string();
 
     Ok(Sample {
