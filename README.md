@@ -39,6 +39,30 @@ RustyClean is not restricted to a single host reference. You can point any backe
 
 For `kraken2` and `centrifuge`, the database only needs to contain the host lineage (e.g. *Homo sapiens*, taxid 9606). For `bowtie2` and `minimap2`, build the index directly from the host reference FASTA. This makes RustyClean applicable across diverse host species and metagenome types (saliva, vaginal, gut, plant root, etc.).
 
+### Reference genomes used in benchmarks
+
+The following NCBI RefSeq assemblies were used to build the host indices in our benchmark studies. You can use the same references or substitute your own host genome of interest.
+
+| Host | Assembly | NCBI accessions / download links |
+|------|----------|----------------------------------|
+| Human (GRCh38) | GRCh38.p14 | `GCF_000001405.40_GRCh38.p14_genomic.fna.gz` |
+| Human (T2T) | T2T-CHM13v2.0 | `GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz` |
+| Mouse | GRCm39 | `GCF_000001635.27_GRCm39_genomic.fna.gz` |
+| Rat | mRatBN7.2 | `GCF_015227675.2_mRatBN7.2_genomic.fna.gz` |
+| Pig | Sscrofa11.1 | `GCF_000003025.6_Sscrofa11.1_genomic.fna.gz` |
+| Rice | IRGSP-1.0 | `GCF_001433935.1_IRGSP-1.0_genomic.fna.gz` |
+| Monkey (rhesus) | Mmul_10 | `GCF_003339765.1_Mmul_10_genomic.fna.gz` |
+
+For Kraken2/Centrifuge, only the host lineage (e.g. taxid 9606 for human) needs to be present in the database. For Bowtie2 and minimap2, build the index directly from the reference FASTA:
+
+```bash
+# Bowtie2 index
+bowtie2-build host.fa host_index_prefix
+
+# Minimap2 index
+minimap2 -x sr -d host_index.mmi host.fa
+```
+
 ## Prerequisites
 
 Install the following tools and ensure they are available in `$PATH`. Only the tools required by your chosen backend need to be installed.
