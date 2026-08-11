@@ -43,6 +43,8 @@ For `kraken2` and `centrifuge`, the database only needs to contain the host line
 
 The following NCBI RefSeq assemblies were used to build the host indices in our benchmark studies. You can use the same references or substitute your own host genome of interest.
 
+**Note:** GRCh38 and T2T-CHM13 are *alternative* human reference assemblies. They are not combined; choose one according to your study (GRCh38 is the standard reference, T2T-CHM13 is a complete telomere-to-telomere assembly).
+
 | Host | Assembly | NCBI accessions / download links |
 |------|----------|----------------------------------|
 | Human (GRCh38) | GRCh38.p14 | `GCF_000001405.40_GRCh38.p14_genomic.fna.gz` |
@@ -52,6 +54,19 @@ The following NCBI RefSeq assemblies were used to build the host indices in our 
 | Pig | Sscrofa11.1 | `GCF_000003025.6_Sscrofa11.1_genomic.fna.gz` |
 | Rice | IRGSP-1.0 | `GCF_001433935.1_IRGSP-1.0_genomic.fna.gz` |
 | Monkey (rhesus) | Mmul_10 | `GCF_003339765.1_Mmul_10_genomic.fna.gz` |
+
+#### Pre-built indices on HKU HPC2021
+
+If you have access to the HKU HPC2021 cluster, the following pre-built indices are available under `/lustre1/g/aos_shihuang/databases/`:
+
+| Index | Path | Backend | Note |
+|-------|------|---------|------|
+| Human GRCh38.p14 FASTA | `/lustre1/g/aos_shihuang/databases/human/GCF_000001405.40_GRCh38.p14_genomic.fna.gz` | Bowtie2 / minimap2 | Build your own index with `bowtie2-build` or `minimap2 -d` |
+| Human GRCh38.p14 minimap2 | `/lustre1/g/aos_shihuang/databases/human/GRCh38.p14.mmi` | minimap2 | Ready to use |
+| Human hg39 Bowtie2 | `/lustre1/g/aos_shihuang/databases/kneaddata/hg_39` | Bowtie2 | KneadData-compatible human index |
+| Human T2T+HLA (in progress) | `/lustre1/g/aos_shihuang/databases/rustyclean_alt/human_t2t_hla` | Bowtie2 / minimap2 | Index build incomplete; verify before use |
+| Cross-species multi-host Bowtie2 | `/lustre1/g/aos_shihuang/databases/host_genomes_cross/multi_host_bt2` | Bowtie2 | Human + mouse + rat + pig + rice + monkey combined |
+| Kraken2 MiniKraken2 / Standard | `/lustre1/g/aos_shihuang/databases/kraken2/kraken16` | Kraken2 | Contains human lineage (taxid 9606) |
 
 For Kraken2/Centrifuge, only the host lineage (e.g. taxid 9606 for human) needs to be present in the database. For Bowtie2 and minimap2, build the index directly from the reference FASTA:
 
