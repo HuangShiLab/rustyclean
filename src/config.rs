@@ -74,6 +74,11 @@ pub enum HostRemovalConfig {
         minimum_hit_groups: u32,
         #[serde(default = "default_memory_mapping")]
         memory_mapping: bool,
+        /// Re-align Kraken2-unclassified reads with Bowtie2 against the host index.
+        #[serde(default)]
+        bowtie2_recheck: bool,
+        /// Bowtie2 index prefix used for the optional recheck step.
+        bowtie2_index_prefix: Option<PathBuf>,
     },
     #[serde(rename = "minimap2")]
     Minimap2 {
@@ -110,6 +115,10 @@ pub enum HostRemovalConfig {
         survey: bool,
         survey_n_reads: u64,
         survey_threads: usize,
+        /// Re-align Kraken2-unclassified reads with Bowtie2 against the host index
+        /// when the auto backend resolves to kraken2.
+        #[serde(default)]
+        bowtie2_recheck: bool,
     },
 }
 
@@ -160,6 +169,8 @@ impl Default for HostRemovalConfig {
             confidence_threshold: 0.0,
             minimum_hit_groups: 2,
             memory_mapping: false,
+            bowtie2_recheck: false,
+            bowtie2_index_prefix: None,
         }
     }
 }

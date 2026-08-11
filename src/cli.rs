@@ -71,6 +71,13 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub kraken2_memory_mapping: bool,
 
+    /// After Kraken2 classification, re-align reads classified as unclassified
+    /// by Kraken2 with Bowtie2 against the host index. This catches host reads
+    /// that Kraken2 could not confidently classify, at the cost of additional
+    /// runtime (default: disabled).
+    #[arg(long, default_value_t = false)]
+    pub bowtie2_recheck: bool,
+
     /// Path to human reference index:
     /// - minimap2: .mmi file
     /// - bowtie2: index prefix

@@ -257,6 +257,7 @@ async fn resolve_auto_config(
         survey,
         survey_n_reads,
         survey_threads,
+        bowtie2_recheck,
     ) = match &auto_cfg {
         HostRemovalConfig::Auto {
             kraken2_db_path,
@@ -269,6 +270,7 @@ async fn resolve_auto_config(
             survey,
             survey_n_reads,
             survey_threads,
+            bowtie2_recheck,
         } => (
             kraken2_db_path.clone(),
             bowtie2_index_prefix.clone(),
@@ -280,6 +282,7 @@ async fn resolve_auto_config(
             *survey,
             *survey_n_reads,
             *survey_threads,
+            *bowtie2_recheck,
         ),
         _ => unreachable!(),
     };
@@ -339,6 +342,8 @@ async fn resolve_auto_config(
             confidence_threshold: 0.0,
             minimum_hit_groups: 2,
             memory_mapping: false,
+            bowtie2_recheck,
+            bowtie2_index_prefix: Some(bowtie2_index_prefix.clone()),
         },
         _ => HostRemovalConfig::Bowtie2 {
             index_prefix: bowtie2_index_prefix,
@@ -781,12 +786,12 @@ async fn run_kraken2(
     work_dir: &Path,
 ) -> Result<()> {
     let kraken_cfg = match &config.tools.host_removal {
-        HostRemovalConfig::Kraken2 { db_path, threads, confidence_threshold, minimum_hit_groups, memory_mapping } => {
-            (db_path.clone(), *threads, *confidence_threshold, *minimum_hit_groups, *memory_mapping)
+        HostRemovalConfig::Kraken2 { db_path, threads, confidence_threshold, minimum_hit_groups, memory_mapping, bowtie2_recheck, bowtie2_index_prefix } => {
+            (db_path.clone(), *threads, *confidence_threshold, *minimum_hit_groups, *memory_mapping, *bowtie2_recheck, bowtie2_index_prefix.clone())
         }
         _ => bail!("internal error: run_kraken2 called with non-kraken2 config"),
     };
-    let (db_path, threads, confidence_threshold, minimum_hit_groups, memory_mapping) = kraken_cfg;
+    let (db_path, threads, confidence_threshold, minimum_hit_groups, memory_mapping, bowtie2_recheck, bowtie2_index_prefix) = kraken_cfg;
 
     let fastp = checkpoint
         .fastp_metrics
@@ -833,36 +838,153 @@ async fn run_kraken2(
         return Err(RustycleanError::ToolExecution(stderr.to_string()).into());
     }
 
-    // Parse Kraken2 per-read output to identify human reads
-    let human_ids = tokio::task::spawn_blocking({
+    // Parse Kraken2 per-read output to identify human and unclassified reads
+    let classification = tokio::task::spawn_blocking({
         let kraken_output = kraken_output.clone();
         move || parse_kraken_output(&kraken_output)
     })
     .await
     .map_err(|e| RustycleanError::ToolExecution(format!("failed to parse kraken2 output: {}", e)))??;
 
+    let mut human_ids = classification.human_ids;
+
+    // Optional Bowtie2 re-check of Kraken2-unclassified reads against the host index.
+    if bowtie2_recheck {
+        let index_prefix = bowtie2_index_prefix
+            .as_ref()
+            .context("--bowtie2-recheck requires --host-index (bowtie2 index prefix)")?;
+        info!(
+            sample = %sample.id,
+            unclassified_reads = classification.unclassified_ids.len(),
+            "running Bowtie2 re-check on Kraken2-unclassified reads"
+        );
+        let recheck_human_ids = run_bowtie2_recheck(
+            sample,
+            &fastp.output_r1,
+            fastp.output_r2.as_deref(),
+            &classification.unclassified_ids,
+            index_prefix,
+            threads,
+            work_dir,
+        ).await?;
+        let additional_host = recheck_human_ids.len() as u64;
+        human_ids.extend(recheck_human_ids);
+        info!(
+            sample = %sample.id,
+            additional_host_reads = additional_host,
+            "Bowtie2 re-check complete"
+        );
+    }
+
     // Derive counts from the report for metrics.
     // We report consistently with alignment backends:
     //   human_reads     = reads classified as Homo sapiens (host)
     //   unclassified    = reads kept after filtering (microbial + unclassified)
-    let (classified_total, unclassified_total, human) = tokio::task::spawn_blocking({
+    let (_classified_total, _unclassified_total, human) = tokio::task::spawn_blocking({
         let kraken_report = kraken_report.clone();
         move || parse_kraken_report_counts(&kraken_report)
     })
     .await
     .map_err(|e| RustycleanError::ToolExecution(format!("failed to parse kraken2 report: {}", e)))??;
 
-    let kept = classified_total.saturating_sub(human) + unclassified_total;
-    finalize_host_removal(sample, checkpoint, human_ids, human, kept).await?;
+    // If recheck added host reads, adjust the reported human count and unclassified count.
+    let reported_human = if bowtie2_recheck {
+        human_ids.len() as u64
+    } else {
+        human
+    };
+    let kept = fastp.output_reads.saturating_sub(reported_human);
+    finalize_host_removal(sample, checkpoint, human_ids, reported_human, kept).await?;
 
     Ok(())
 }
 
-fn parse_kraken_output(path: &Path) -> Result<HashSet<String>> {
+/// Re-align Kraken2-unclassified reads with Bowtie2 against the host index and
+/// return the read IDs that map to the host.
+async fn run_bowtie2_recheck(
+    _sample: &Sample,
+    r1: &Path,
+    r2: Option<&Path>,
+    unclassified_ids: &HashSet<String>,
+    index_prefix: &Path,
+    threads: usize,
+    work_dir: &Path,
+) -> Result<HashSet<String>> {
+    if unclassified_ids.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    // Extract unclassified reads from the QC-filtered input.
+    let recheck_r1 = work_dir.join("recheck_R1.fastq.gz");
+    let recheck_r2 = r2.map(|_| work_dir.join("recheck_R2.fastq.gz"));
+
+    let ids = unclassified_ids.clone();
+    let r1_src = r1.to_path_buf();
+    let r1_dst = recheck_r1.clone();
+    tokio::task::spawn_blocking(move || extract_fastq_reads(&r1_src, &r1_dst, &ids))
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to extract recheck R1 reads: {}", e)))??;
+
+    if let (Some(r2_src), Some(r2_dst)) = (r2, recheck_r2.as_ref()) {
+        let ids = unclassified_ids.clone();
+        let r2_src = r2_src.to_path_buf();
+        let r2_dst = r2_dst.clone();
+        tokio::task::spawn_blocking(move || extract_fastq_reads(&r2_src, &r2_dst, &ids))
+            .await
+            .map_err(|e| RustycleanError::ToolExecution(format!("failed to extract recheck R2 reads: {}", e)))??;
+    }
+
+    // Run Bowtie2 on the extracted reads.
+    let sam_output = work_dir.join("bowtie2_recheck.sam");
+    let mut cmd = Command::new("bowtie2");
+    cmd.arg("-x").arg(index_prefix)
+        .arg("--very-fast-local")
+        .arg("-p").arg(threads.to_string());
+
+    if let Some(r2_path) = &recheck_r2 {
+        cmd.arg("-1").arg(&recheck_r1)
+            .arg("-2").arg(r2_path);
+    } else {
+        cmd.arg("-U").arg(&recheck_r1);
+    }
+
+    cmd.arg("-S").arg(&sam_output);
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to run bowtie2 recheck: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(RustycleanError::ToolExecution(format!("bowtie2 recheck failed: {}", stderr)).into());
+    }
+
+    // Parse SAM to obtain mapped IDs.
+    let (mapped_ids, _, _) = tokio::task::spawn_blocking({
+        let sam_output = sam_output.clone();
+        move || parse_sam_mapped_ids(&sam_output)
+    })
+    .await
+    .map_err(|e| RustycleanError::ToolExecution(format!("failed to parse bowtie2 recheck SAM: {}", e)))??;
+
+    Ok(mapped_ids)
+}
+
+/// Parsed per-read Kraken2 output.
+#[derive(Debug, Default)]
+struct Kraken2ReadClassification {
+    /// Read IDs classified as Homo sapiens (taxid 9606).
+    human_ids: HashSet<String>,
+    /// Read IDs classified as unclassified (status "U").
+    unclassified_ids: HashSet<String>,
+}
+
+fn parse_kraken_output(path: &Path) -> Result<Kraken2ReadClassification> {
     let file = std::fs::File::open(path)
         .map_err(|e| RustycleanError::ToolExecution(format!("failed to open kraken2 output: {}", e)))?;
     let reader = BufReader::new(file);
-    let mut human_ids = HashSet::new();
+    let mut result = Kraken2ReadClassification::default();
 
     for line in reader.lines() {
         let line = line.map_err(|e| RustycleanError::ToolExecution(format!("failed to read kraken2 output: {}", e)))?;
@@ -876,14 +998,16 @@ fn parse_kraken_output(path: &Path) -> Result<HashSet<String>> {
         let status = fields[0];
         let read_id = fields[1];
         let taxid: i64 = fields[2].parse().unwrap_or(0);
+        let normalized = normalize_read_id(read_id);
 
-        // Remove reads classified as Homo sapiens (taxid 9606)
         if status == "C" && taxid == 9606 {
-            human_ids.insert(normalize_read_id(read_id));
+            result.human_ids.insert(normalized);
+        } else if status == "U" {
+            result.unclassified_ids.insert(normalized);
         }
     }
 
-    Ok(human_ids)
+    Ok(result)
 }
 
 fn parse_kraken_report_counts(path: &Path) -> Result<(u64, u64, u64)> {
@@ -1277,6 +1401,54 @@ fn filter_fastq_file(src: &Path, dst: &Path, human_ids: &HashSet<String>) -> Res
             let normalized = normalize_read_id(read_id);
 
             if !human_ids.contains(&normalized) {
+                writer.write_all(&record)
+                    .map_err(|e| RustycleanError::ToolExecution(format!("write error: {}", e)))?;
+            }
+
+            record.clear();
+            line_count = 0;
+        }
+    }
+
+    writer.finish()
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to finalize gzip: {}", e)))?;
+
+    Ok(())
+}
+
+/// Extract reads whose normalized ID is in `keep_ids` from `src` to `dst`.
+fn extract_fastq_reads(src: &Path, dst: &Path, keep_ids: &HashSet<String>) -> Result<()> {
+    let mut reader = open_fastq_reader(src)?;
+    let file = std::fs::File::create(dst)
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to create FASTQ {}: {}", dst.display(), e)))?;
+    let mut writer = GzEncoder::new(BufWriter::new(file), Compression::fast());
+
+    let mut record = Vec::with_capacity(1024);
+    let mut line_count = 0;
+    let mut line = Vec::new();
+
+    loop {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)
+            .map_err(|e| RustycleanError::ToolExecution(format!("read error: {}", e)))?;
+        if n == 0 {
+            if line_count > 0 {
+                return Err(RustycleanError::ToolExecution("unexpected EOF in FASTQ".to_string()).into());
+            }
+            break;
+        }
+        record.extend_from_slice(&line);
+        line_count += 1;
+
+        if line_count == 4 {
+            let first_end = record.iter().position(|&b| b == b'\n').unwrap_or(record.len());
+            let first = std::str::from_utf8(&record[..first_end])
+                .map_err(|e| RustycleanError::ToolExecution(format!("invalid UTF-8 in FASTQ name: {}", e)))?;
+            let read_id = first.strip_prefix('@').unwrap_or(first);
+            let read_id = read_id.split_whitespace().next().unwrap_or(read_id);
+            let normalized = normalize_read_id(read_id);
+
+            if keep_ids.contains(&normalized) {
                 writer.write_all(&record)
                     .map_err(|e| RustycleanError::ToolExecution(format!("write error: {}", e)))?;
             }

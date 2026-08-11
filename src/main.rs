@@ -69,6 +69,8 @@ async fn main() -> Result<()> {
                 confidence_threshold: 0.0,
                 minimum_hit_groups: 2,
                 memory_mapping: cli.kraken2_memory_mapping,
+                bowtie2_recheck: cli.bowtie2_recheck,
+                bowtie2_index_prefix: cli.host_index.clone(),
             }
         }
         HostRemovalModeCli::Minimap2 => {
@@ -146,6 +148,7 @@ async fn main() -> Result<()> {
                 survey: cli.auto_survey,
                 survey_n_reads: cli.auto_survey_nreads,
                 survey_threads: cli.auto_survey_threads,
+                bowtie2_recheck: cli.bowtie2_recheck,
             }
         }
     };
@@ -226,8 +229,8 @@ async fn main() -> Result<()> {
 
 fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemovalConfig {
     match cfg {
-        HostRemovalConfig::Kraken2 { db_path, confidence_threshold, minimum_hit_groups, memory_mapping, .. } => {
-            HostRemovalConfig::Kraken2 { db_path, threads, confidence_threshold, minimum_hit_groups, memory_mapping }
+        HostRemovalConfig::Kraken2 { db_path, confidence_threshold, minimum_hit_groups, memory_mapping, bowtie2_recheck, bowtie2_index_prefix, .. } => {
+            HostRemovalConfig::Kraken2 { db_path, threads, confidence_threshold, minimum_hit_groups, memory_mapping, bowtie2_recheck, bowtie2_index_prefix }
         }
         HostRemovalConfig::Minimap2 { index_path, .. } => {
             HostRemovalConfig::Minimap2 { index_path, threads }
@@ -251,6 +254,7 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
             survey,
             survey_n_reads,
             survey_threads,
+            bowtie2_recheck,
             ..
         } => {
             HostRemovalConfig::Auto {
@@ -264,6 +268,7 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
                 survey,
                 survey_n_reads,
                 survey_threads,
+                bowtie2_recheck,
             }
         }
     }
@@ -295,7 +300,13 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
     }
 
     let backend_tools: Vec<&str> = match host_removal {
-        HostRemovalConfig::Kraken2 { .. } => vec!["kraken2"],
+        HostRemovalConfig::Kraken2 { bowtie2_recheck, .. } => {
+            let mut tools = vec!["kraken2"];
+            if *bowtie2_recheck {
+                tools.extend(&["bowtie2", "samtools"]);
+            }
+            tools
+        }
         HostRemovalConfig::Minimap2 { .. } => vec!["minimap2"],
         HostRemovalConfig::Bowtie2 { .. } => vec!["bowtie2", "samtools"],
         HostRemovalConfig::Sylph { .. } => vec!["sylph"],
