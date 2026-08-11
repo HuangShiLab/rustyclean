@@ -48,7 +48,7 @@ The following NCBI RefSeq assemblies were used to build the host indices in our 
 | Host | Assembly | NCBI accessions / download links |
 |------|----------|----------------------------------|
 | Human (GRCh38) | GRCh38.p14 | `GCF_000001405.40_GRCh38.p14_genomic.fna.gz` |
-| Human (T2T) | T2T-CHM13v2.0 | `GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz` |
+| Human (T2T+HLA) | T2T-CHM13v2.0 + HLA | Hostile-prepared `human-t2t-hla.fa.gz` (T2T-CHM13v2.0 plus HLA contigs) |
 | Mouse | GRCm39 | `GCF_000001635.27_GRCm39_genomic.fna.gz` |
 | Rat | mRatBN7.2 | `GCF_015227675.2_mRatBN7.2_genomic.fna.gz` |
 | Pig | Sscrofa11.1 | `GCF_000003025.6_Sscrofa11.1_genomic.fna.gz` |
@@ -64,7 +64,8 @@ If you have access to the HKU HPC2021 cluster, the following pre-built indices a
 | Human GRCh38.p14 FASTA | `/lustre1/g/aos_shihuang/databases/human/GCF_000001405.40_GRCh38.p14_genomic.fna.gz` | Bowtie2 / minimap2 | Build your own index with `bowtie2-build` or `minimap2 -d` |
 | Human GRCh38.p14 minimap2 | `/lustre1/g/aos_shihuang/databases/human/GRCh38.p14.mmi` | minimap2 | Ready to use |
 | Human hg39 Bowtie2 | `/lustre1/g/aos_shihuang/databases/kneaddata/hg_39` | Bowtie2 | KneadData-compatible human index |
-| Human T2T+HLA (in progress) | `/lustre1/g/aos_shihuang/databases/rustyclean_alt/human_t2t_hla` | Bowtie2 / minimap2 | Index build incomplete; verify before use |
+| Human T2T+HLA | `/home/shihuang/.local/share/hostile/human-t2t-hla` | Bowtie2 / minimap2 | T2T-CHM13v2.0 + HLA sequences prepared by Hostile |
+| Human T2T+HLA (copy, incomplete) | `/lustre1/g/aos_shihuang/databases/rustyclean_alt/human_t2t_hla` | Bowtie2 / minimap2 | Index build incomplete; use the Hostile path above |
 | Cross-species multi-host Bowtie2 | `/lustre1/g/aos_shihuang/databases/host_genomes_cross/multi_host_bt2` | Bowtie2 | Human + mouse + rat + pig + rice + monkey combined |
 | Kraken2 MiniKraken2 / Standard | `/lustre1/g/aos_shihuang/databases/kraken2/kraken16` | Kraken2 | Contains human lineage (taxid 9606) |
 
