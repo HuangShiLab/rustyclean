@@ -257,6 +257,7 @@ async fn resolve_auto_config(
         survey,
         survey_n_reads,
         survey_threads,
+        memory_mapping,
         bowtie2_recheck,
     ) = match &auto_cfg {
         HostRemovalConfig::Auto {
@@ -270,6 +271,7 @@ async fn resolve_auto_config(
             survey,
             survey_n_reads,
             survey_threads,
+            memory_mapping,
             bowtie2_recheck,
         } => (
             kraken2_db_path.clone(),
@@ -282,6 +284,7 @@ async fn resolve_auto_config(
             *survey,
             *survey_n_reads,
             *survey_threads,
+            *memory_mapping,
             *bowtie2_recheck,
         ),
         _ => unreachable!(),
@@ -327,11 +330,15 @@ async fn resolve_auto_config(
     };
 
     let chosen = choose_auto_backend(host_pct, input_reads, low_thr, high_thr, reads_thr);
+    // In auto mode, default to bowtie2 recheck for high-host samples (kraken2 branch).
+    // Users can still force it on for all samples via --bowtie2-recheck.
+    let effective_bowtie2_recheck = bowtie2_recheck || (host_pct > high_thr);
     info!(
         sample = %sample.id,
         host_pct = format!("{:.2}", host_pct),
         input_reads = input_reads,
         chosen_backend = chosen,
+        bowtie2_recheck = effective_bowtie2_recheck,
         "auto mode: selected backend"
     );
 
@@ -341,8 +348,8 @@ async fn resolve_auto_config(
             threads,
             confidence_threshold: 0.0,
             minimum_hit_groups: 2,
-            memory_mapping: false,
-            bowtie2_recheck,
+            memory_mapping,
+            bowtie2_recheck: effective_bowtie2_recheck,
             bowtie2_index_prefix: Some(bowtie2_index_prefix.clone()),
         },
         _ => HostRemovalConfig::Bowtie2 {

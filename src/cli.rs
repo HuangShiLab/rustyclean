@@ -74,7 +74,8 @@ pub struct Cli {
     /// After Kraken2 classification, re-align reads classified as unclassified
     /// by Kraken2 with Bowtie2 against the host index. This catches host reads
     /// that Kraken2 could not confidently classify, at the cost of additional
-    /// runtime (default: disabled).
+    /// runtime. In auto mode this is enabled by default when the estimated host
+    /// fraction exceeds the high threshold (default: disabled for manual kraken2).
     #[arg(long, default_value_t = false)]
     pub bowtie2_recheck: bool,
 

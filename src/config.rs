@@ -115,6 +115,9 @@ pub enum HostRemovalConfig {
         survey: bool,
         survey_n_reads: u64,
         survey_threads: usize,
+        /// Use Kraken2 --memory-mapping when the auto backend resolves to kraken2.
+        #[serde(default = "default_memory_mapping")]
+        memory_mapping: bool,
         /// Re-align Kraken2-unclassified reads with Bowtie2 against the host index
         /// when the auto backend resolves to kraken2.
         #[serde(default)]
