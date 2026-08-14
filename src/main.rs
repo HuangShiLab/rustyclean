@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
                 survey: cli.auto_survey,
                 survey_n_reads: cli.auto_survey_nreads,
                 survey_threads: cli.auto_survey_threads,
+                memory_mapping: cli.kraken2_memory_mapping,
                 bowtie2_recheck: cli.bowtie2_recheck,
             }
         }
@@ -254,6 +255,7 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
             survey,
             survey_n_reads,
             survey_threads,
+            memory_mapping,
             bowtie2_recheck,
             ..
         } => {
@@ -268,6 +270,7 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
                 survey,
                 survey_n_reads,
                 survey_threads,
+                memory_mapping,
                 bowtie2_recheck,
             }
         }
