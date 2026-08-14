@@ -6,6 +6,7 @@ mod pipeline;
 mod sample;
 mod worker;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -44,6 +45,7 @@ async fn main() -> Result<()> {
     };
 
     // Apply CLI overrides
+    let workers_from_cli = cli.workers.is_some();
     if let Some(w) = cli.workers {
         config.execution.workers = w;
     }
@@ -154,6 +156,21 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Cap worker count by available memory when the user did not explicitly set it.
+    // Each worker loads its own database copy, so concurrent memory demand scales
+    // with worker count. This prevents OOM on memory-constrained nodes.
+    if !workers_from_cli {
+        let cpu_workers = config.execution.workers;
+        let mem_capped = memory_cap_workers(&config.tools.host_removal, cpu_workers);
+        if mem_capped != cpu_workers {
+            info!(
+                "Capping parallel workers by available memory: {} -> {}",
+                cpu_workers, mem_capped
+            );
+            config.execution.workers = mem_capped;
+        }
+    }
+
     if cli.resume {
         config.execution.resume = true;
     }
@@ -226,6 +243,97 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Return available memory in kB, preferring cgroup limits over /proc/meminfo.
+fn available_memory_kb() -> Option<u64> {
+    // cgroup v2
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory.max") {
+        if let Ok(bytes) = s.trim().parse::<u64>() {
+            return Some(bytes / 1024);
+        }
+    }
+    // cgroup v1
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/memory/memory.limit_in_bytes") {
+        if let Ok(bytes) = s.trim().parse::<u64>() {
+            return Some(bytes / 1024);
+        }
+    }
+    // Fallback to system memory
+    if let Ok(s) = std::fs::read_to_string("/proc/meminfo") {
+        for line in s.lines() {
+            if line.starts_with("MemAvailable:") {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    if let Ok(kb) = parts[1].parse::<u64>() {
+                        return Some(kb);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Estimate the resident database size in kB for the chosen backend.
+fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
+    let paths: Vec<PathBuf> = match host_removal {
+        HostRemovalConfig::Kraken2 { db_path, .. } => {
+            vec![db_path.join("hash.k2d")]
+        }
+        HostRemovalConfig::Auto { kraken2_db_path, .. } => {
+            // Auto mode's memory peak is dominated by the Kraken2 branch.
+            vec![kraken2_db_path.join("hash.k2d")]
+        }
+        HostRemovalConfig::Bowtie2 { index_prefix, .. } => {
+            vec![
+                index_prefix.with_extension("1.bt2"),
+                index_prefix.with_extension("2.bt2"),
+                index_prefix.with_extension("3.bt2"),
+                index_prefix.with_extension("4.bt2"),
+                index_prefix.with_extension("rev.1.bt2"),
+                index_prefix.with_extension("rev.2.bt2"),
+            ]
+        }
+        HostRemovalConfig::Minimap2 { index_path, .. } => vec![index_path.clone()],
+        HostRemovalConfig::Centrifuge { db_path, .. } => {
+            vec![
+                db_path.with_extension("1.cf"),
+                db_path.with_extension("2.cf"),
+                db_path.with_extension("3.cf"),
+            ]
+        }
+        HostRemovalConfig::Sylph { db_path, .. } => vec![db_path.clone()],
+    };
+
+    let mut total_bytes: u64 = 0;
+    for p in paths {
+        if let Ok(m) = std::fs::metadata(&p) {
+            total_bytes += m.len();
+        }
+    }
+
+    if total_bytes == 0 {
+        None
+    } else {
+        Some(total_bytes / 1024)
+    }
+}
+
+/// Cap worker count so that concurrent database copies fit in available memory.
+fn memory_cap_workers(host_removal: &HostRemovalConfig, cpu_workers: usize) -> usize {
+    let Some(db_kb) = estimate_db_size_kb(host_removal) else {
+        return cpu_workers;
+    };
+    let Some(avail_kb) = available_memory_kb() else {
+        return cpu_workers;
+    };
+
+    // Reserve 20% headroom for the OS, tool overhead, and intermediate files.
+    let usable_kb = (avail_kb as f64 * 0.8).max(1.0);
+    let max_by_mem = (usable_kb / db_kb as f64).max(1.0) as usize;
+
+    cpu_workers.min(max_by_mem)
 }
 
 fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemovalConfig {

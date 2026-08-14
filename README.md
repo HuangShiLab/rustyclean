@@ -9,7 +9,7 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 - **`--skip-qc` mode** -- bypass fastp and feed raw reads directly to the host-removal backend, useful for already-QC'd data or fair benchmarking of host removal only
 - **Dual input mode** -- direct FASTQ(.gz) file input or batch processing via sample list
 - **Single-end & paired-end** -- automatically adapts the pipeline based on input
-- **Parallel processing** -- concurrent sample processing with configurable worker count
+- **Parallel processing** -- concurrent sample processing with configurable worker count; when workers are not specified, RustyClean caps concurrency by available memory to avoid loading more database copies than fit in RAM
 - **Checkpoint & resume** -- saves progress automatically; interrupted runs can be resumed
 - **Retry on failure** -- configurable retry attempts per sample
 - **Validation** -- checks output file size and host contamination rate after processing
@@ -211,6 +211,16 @@ Options:
   -h, --help                           Print help
   -V, --version                        Print version
 ```
+
+### Memory-aware worker cap
+
+If `-w/--workers` is not set, RustyClean estimates the resident database size
+(for example, `hash.k2d` for Kraken2, the Bowtie2 index files, or the minimap2
+`.mmi`) and the available memory (cgroup limit first, then `/proc/meminfo`
+`MemAvailable`). It then caps the default CPU-based worker count so that
+concurrent workers do not collectively exceed ~80% of available RAM. This
+prevents out-of-memory failures when many samples are processed in parallel on
+shared-memory nodes. You can override the cap by explicitly setting `-w`.
 
 ## Pipeline
 
