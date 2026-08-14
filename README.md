@@ -19,7 +19,7 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 
 | Backend | Description | Best for |
 |---------|-------------|----------|
-| `kraken2` | k-mer based taxonomic classification; removes reads classified as *Homo sapiens* (taxid 9606) | Large, high-host samples; when microbial context is also useful |
+| `kraken2` | k-mer based taxonomic classification against a host-specific Kraken2 database; removes reads classified as *Homo sapiens* (taxid 9606). Default human database is T2T-only. | Large, high-host samples; when microbial context is also useful |
 | `bowtie2` | Short-read alignment against a host reference index | Low-host samples; fastest when host fraction is small |
 | `minimap2` | Long- or short-read alignment (`-x sr`) | Long reads or when a minimap2 index is preferred |
 | `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
@@ -28,6 +28,8 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 ## Databases
 
 RustyClean is not restricted to a single host reference. You can point any backend to a custom database or index built from the host genome of interest. Common use cases include human (e.g. GRCh38, T2T-CHM13), mouse, rat, pig, rice, monkey, and other plant or animal host genomes.
+
+**Default human database.** For human metagenomes, the recommended default is a **T2T-only Kraken2 database** built from the T2T-CHM13v2.0 assembly. This database is smaller and faster than mixed multi-host libraries while retaining high accuracy for human host removal. A mixed multi-host Kraken2 database ("Kraken16", containing human plus other common hosts) is available as an optional taxonomy-aware mode when you expect cross-species contamination or want taxonomic context.
 
 | Backend | Database / index type | How to specify |
 |---------|----------------------|----------------|
@@ -43,7 +45,7 @@ For `kraken2` and `centrifuge`, the database only needs to contain the host line
 
 The following NCBI RefSeq assemblies were used to build the host indices in our benchmark studies. You can use the same references or substitute your own host genome of interest.
 
-**Note:** GRCh38 and T2T-CHM13 are *alternative* human reference assemblies. They are not combined; choose one according to your study (GRCh38 is the standard reference, T2T-CHM13 is a complete telomere-to-telomere assembly).
+**Note:** For human host removal, the default reference is **T2T-CHM13v2.0**. GRCh38.p14 is provided as an alternative standard reference. They are not combined; choose one according to your study.
 
 | Host | Assembly | NCBI accessions / download links |
 |------|----------|----------------------------------|
@@ -67,7 +69,8 @@ If you have access to the HKU HPC2021 cluster, the following pre-built indices a
 | Human T2T+HLA | `/home/shihuang/.local/share/hostile/human-t2t-hla` | Bowtie2 / minimap2 | T2T-CHM13v2.0 + HLA sequences prepared by Hostile |
 | Human T2T+HLA (copy, incomplete) | `/lustre1/g/aos_shihuang/databases/rustyclean_alt/human_t2t_hla` | Bowtie2 / minimap2 | Index build incomplete; use the Hostile path above |
 | Cross-species multi-host Bowtie2 | `/lustre1/g/aos_shihuang/databases/host_genomes_cross/multi_host_bt2` | Bowtie2 | Human + mouse + rat + pig + rice + monkey combined |
-| Kraken2 MiniKraken2 / Standard | `/lustre1/g/aos_shihuang/databases/kraken2/kraken16` | Kraken2 | Contains human lineage (taxid 9606) |
+| Human T2T-only Kraken2 | `/lustre1/g/aos_shihuang/databases/rustyclean_human_t2t_only/kraken2/t2t_only` | Kraken2 | **Default human database** (T2T-CHM13v2.0 only) |
+| Mixed multi-host Kraken2 ("Kraken16") | `/lustre1/g/aos_shihuang/databases/kraken2/kraken16` | Kraken2 | Optional taxonomy-aware mode; contains human lineage (taxid 9606) plus microbial genomes |
 
 For Kraken2/Centrifuge, only the host lineage (e.g. taxid 9606 for human) needs to be present in the database. For Bowtie2 and minimap2, build the index directly from the reference FASTA:
 
@@ -77,6 +80,29 @@ bowtie2-build host.fa host_index_prefix
 
 # Minimap2 index
 minimap2 -x sr -d host_index.mmi host.fa
+```
+
+#### Building the default human T2T-only Kraken2 database
+
+The default human Kraken2 database is built from the T2T-CHM13v2.0 assembly only. Example:
+
+```bash
+DB_DIR="/path/to/rustyclean_human_t2t_only"
+mkdir -p "${DB_DIR}/kraken2/t2t_only"
+
+# Download T2T-CHM13v2.0
+wget -P "${DB_DIR}" \
+  https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/009/914/755/GCF_009914755.1_T2T-CHM13v2.0/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz
+
+# Build Kraken2 database
+kraken2-build --download-taxonomy --db "${DB_DIR}/kraken2/t2t_only" --threads 8
+kraken2-build --add-to-library \
+  "${DB_DIR}/GCF_009914755.1_T2T-CHM13v2.0_genomic.fna.gz" \
+  --db "${DB_DIR}/kraken2/t2t_only" --threads 8
+kraken2-build --build --db "${DB_DIR}/kraken2/t2t_only" --threads 8
+
+# Use it
+rustyclean --r1 sample.fastq.gz --kraken2-db "${DB_DIR}/kraken2/t2t_only" -o output/
 ```
 
 ## Prerequisites
