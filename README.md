@@ -4,7 +4,7 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 
 ## Features
 
-- **Multiple host-removal backends** -- Kraken2, minimap2, Bowtie2, Centrifuge, or adaptive `auto` mode
+- **Multiple host-removal backends** -- Kraken2, minimap2, Bowtie2, sylph, Centrifuge, or adaptive `auto` mode
 - **AUTO mode** -- surveys a small subset of reads and automatically selects Bowtie2 (low-host samples) or Kraken2 (large, high-host samples) for best performance
 - **`--skip-qc` mode** -- bypass fastp and feed raw reads directly to the host-removal backend, useful for already-QC'd data or fair benchmarking of host removal only
 - **Dual input mode** -- direct FASTQ(.gz) file input or batch processing via sample list
@@ -21,6 +21,7 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 |---------|-------------|----------|
 | `kraken2` | k-mer based taxonomic classification against a host-specific Kraken2 database; removes reads classified as *Homo sapiens* (taxid 9606). Default human database is T2T-only. | Large, high-host samples; when microbial context is also useful |
 | `bowtie2` | Short-read alignment against a host reference index | Low-host samples; fastest when host fraction is small |
+| `sylph` | Fast k-mer sketch prefilter (`sylph query`) followed by Bowtie2 read-level removal for host-positive samples | Very fast screening of large cohorts; only runs full alignment when host signal is detected |
 | `minimap2` | Long- or short-read alignment (`-x sr`) | Long reads or when a minimap2 index is preferred |
 | `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
 | `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2` | General use; balances speed and accuracy without manual tuning |
@@ -35,6 +36,7 @@ RustyClean is not restricted to a single host reference. You can point any backe
 |---------|----------------------|----------------|
 | `kraken2` | Pre-built Kraken2 database containing the host taxon | `--kraken2-db /path/to/kraken2_db` |
 | `bowtie2` | Bowtie2 index prefix (files `{prefix}.1.bt2`, `{prefix}.2.bt2`, ...) | `--host-index /path/to/bowtie2_index_prefix` |
+| `sylph` | sylph sketch database (`.syldb`) plus a Bowtie2 index prefix for full removal | `--sylph-db /path/to/human.syldb` and `--host-index /path/to/bowtie2_index_prefix` |
 | `minimap2` | Minimap2 index file (`.mmi`) | `--host-index /path/to/index.mmi` |
 | `centrifuge` | Centrifuge index prefix (files `{prefix}.1.cf`, `{prefix}.2.cf`, ...) | `--host-index /path/to/centrifuge_index_prefix` |
 | `auto` | Both a Kraken2 database and a Bowtie2 index prefix are required | `--kraken2-db ...` and `--host-index ...` |
@@ -70,6 +72,7 @@ If you have access to the HKU HPC2021 cluster, the following pre-built indices a
 | Human T2T+HLA (copy, incomplete) | `/lustre1/g/aos_shihuang/databases/rustyclean_alt/human_t2t_hla` | Bowtie2 / minimap2 | Index build incomplete; use the Hostile path above |
 | Cross-species multi-host Bowtie2 | `/lustre1/g/aos_shihuang/databases/host_genomes_cross/multi_host_bt2` | Bowtie2 | Human + mouse + rat + pig + rice + monkey combined |
 | Human T2T-only Kraken2 | `/lustre1/g/aos_shihuang/databases/rustyclean_human_t2t_only/kraken2/t2t_only` | Kraken2 | **Default human database** (T2T-CHM13v2.0 only) |
+| Human T2T-only sylph | `/lustre1/g/aos_shihuang/databases/rustyclean_human_t2t_only/sylph/human_t2t.syldb` | sylph | Fast k-mer sketch of T2T-CHM13v2.0; used with a Bowtie2 index for full read-level removal |
 | Mixed multi-host Kraken2 ("Kraken16") | `/lustre1/g/aos_shihuang/databases/kraken2/kraken16` | Kraken2 | Optional taxonomy-aware mode; contains human lineage (taxid 9606) plus microbial genomes |
 
 For Kraken2/Centrifuge, only the host lineage (e.g. taxid 9606 for human) needs to be present in the database. For Bowtie2 and minimap2, build the index directly from the reference FASTA:
@@ -111,9 +114,10 @@ Install the following tools and ensure they are available in `$PATH`. Only the t
 
 - [fastp](https://github.com/OpenGene/fastp) (>= 0.23) -- required unless `--skip-qc` is used
 - [Kraken2](https://github.com/DerrickWood/kraken2) (>= 2.1) with a pre-built database -- for `--host-removal-mode kraken2` or `auto`
-- [Bowtie2](https://github.com/BenLangmead/bowtie2) (>= 2.4) and [samtools](http://www.htslib.org/) -- for `--host-removal-mode bowtie2` or `auto`
+- [Bowtie2](https://github.com/BenLangmead/bowtie2) (>= 2.4) and [samtools](http://www.htslib.org/) -- for `--host-removal-mode bowtie2`, `--host-removal-mode sylph`, or `auto`
 - [minimap2](https://github.com/lh3/minimap2) -- for `--host-removal-mode minimap2`
 - [Centrifuge](https://ccb.jhu.edu/software/centrifuge/) -- for `--host-removal-mode centrifuge`
+- [sylph](https://github.com/bluenote-1577/sylph) (>= 0.9) -- for `--host-removal-mode sylph`
 
 ## Installation
 
@@ -144,6 +148,13 @@ rustyclean --r1 sample.fastq.gz \
            --kraken2-db /path/to/kraken2_db \
            --host-index /path/to/bowtie2_index_prefix \
            --auto-survey \
+           -o output/ -t 8
+
+# sylph prefilter + Bowtie2 removal (very fast for cohort screening)
+rustyclean --r1 sample.fastq.gz \
+           --host-removal-mode sylph \
+           --sylph-db /path/to/human_t2t.syldb \
+           --host-index /path/to/bowtie2_index_prefix \
            -o output/ -t 8
 
 # Skip QC and run host removal only (fair comparison with tools like Hostile)
@@ -197,6 +208,9 @@ Options:
       --auto-reads-threshold <N>       Large-sample read threshold for auto mode [default: 20000000]
       --kraken2-db <KRAKEN2_DB>        Kraken2 database path
       --kraken2-memory-mapping         Use Kraken2 --memory-mapping
+      --sylph-db <PATH>                sylph sketch database (.syldb) for sylph backend
+      --sylph-min-ani <PCT>            Minimum Adjusted_ANI (%) for sylph host-positive call [default: 95.0]
+      --sylph-min-cov <FLOAT>          Minimum effective coverage for sylph host-positive call [default: 0.0005]
       --host-index <PATH>              Host index path (minimap2 .mmi, bowtie2 prefix,
                                        centrifuge prefix, sylph .syldb, or auto survey index)
       --max-contamination <PCT>        Max allowed host contamination in output [default: 100.0]
@@ -236,7 +250,7 @@ Input FASTQ(.gz)
       |
       v
   +------------------+
-  | host-removal     |  kraken2 / bowtie2 / minimap2 / centrifuge / auto
+  | host-removal     |  kraken2 / bowtie2 / sylph / minimap2 / centrifuge / auto
   | (selected backend)
   +------------------+
       |
@@ -254,7 +268,7 @@ Input FASTQ(.gz)
       |
       v
   +------------------+
-  | host-removal     |  kraken2 / bowtie2 / minimap2 / centrifuge / auto
+  | host-removal     |  kraken2 / bowtie2 / sylph / minimap2 / centrifuge / auto
   | (selected backend)
   +------------------+
       |
