@@ -1108,22 +1108,15 @@ async fn run_minimap2(
 // bowtie2
 // ----------------------------------------------------------------------------
 
-async fn run_bowtie2(
+/// Run the Bowtie2 streaming host-removal pipeline and return metrics.
+/// The final FASTQ files are written directly to `sample.output_dir`.
+async fn run_bowtie2_pipeline(
     sample: &Sample,
-    checkpoint: &mut Checkpoint,
-    config: &Config,
+    fastp: &FastpMetrics,
+    index_prefix: &Path,
+    threads: usize,
     work_dir: &Path,
-) -> Result<()> {
-    let (index_prefix, threads) = match &config.tools.host_removal {
-        HostRemovalConfig::Bowtie2 { index_prefix, threads } => (index_prefix.clone(), *threads),
-        _ => bail!("internal error: run_bowtie2 called with non-bowtie2 config"),
-    };
-
-    let fastp = checkpoint
-        .fastp_metrics
-        .as_ref()
-        .context("fastp metrics missing before bowtie2 stage")?;
-
+) -> Result<Kraken2Metrics> {
     fs::create_dir_all(&sample.output_dir).await?;
     let final_r1 = sample.output_dir.join(format!("{}_clean_R1.fastq.gz", sample.id));
     let final_r2 = if sample.is_paired() {
@@ -1193,14 +1186,34 @@ async fn run_bowtie2(
         0.0
     };
 
-    checkpoint.kraken2_metrics = Some(Kraken2Metrics {
+    Ok(Kraken2Metrics {
         classified_reads,
         unclassified_reads,
         human_reads: classified_reads,
         contamination_percent: contamination,
         output_r1: final_r1,
         output_r2: final_r2,
-    });
+    })
+}
+
+async fn run_bowtie2(
+    sample: &Sample,
+    checkpoint: &mut Checkpoint,
+    config: &Config,
+    work_dir: &Path,
+) -> Result<()> {
+    let (index_prefix, threads) = match &config.tools.host_removal {
+        HostRemovalConfig::Bowtie2 { index_prefix, threads } => (index_prefix.clone(), *threads),
+        _ => bail!("internal error: run_bowtie2 called with non-bowtie2 config"),
+    };
+
+    let fastp = checkpoint
+        .fastp_metrics
+        .as_ref()
+        .context("fastp metrics missing before bowtie2 stage")?;
+
+    let metrics = run_bowtie2_pipeline(sample, fastp, &index_prefix, threads, work_dir).await?;
+    checkpoint.kraken2_metrics = Some(metrics);
 
     validate_and_finalize(sample, checkpoint, config).await?;
 
@@ -1311,18 +1324,114 @@ fn parse_centrifuge_classifications(path: &Path) -> Result<HashSet<String>> {
 // sylph
 // ----------------------------------------------------------------------------
 
+/// sylph 0.9.x does not provide per-read classification, so the sylph backend
+/// works as a fast prefilter: it queries the sample against a human sylph
+/// sketch database, and host-positive samples are passed to the Bowtie2
+/// streaming pipeline for full read-level removal.
 async fn run_sylph(
-    _sample: &Sample,
-    _checkpoint: &mut Checkpoint,
-    _config: &Config,
-    _work_dir: &Path,
+    sample: &Sample,
+    checkpoint: &mut Checkpoint,
+    config: &Config,
+    work_dir: &Path,
 ) -> Result<()> {
-    // sylph 0.9.x does not provide per-read classification.  It can only
-    // estimate sample-level containment / abundance.  Read-level host removal
-    // would require a different sylph version or another tool.
-    bail!(
-        "sylph backend is not supported for read-level host removal: installed sylph lacks a per-read classify command. Use kraken2, minimap2, or bowtie2 instead."
-    )
+    let (db_path, bowtie2_index_prefix, threads, min_ani, min_eff_cov) = match &config.tools.host_removal {
+        HostRemovalConfig::Sylph { db_path, bowtie2_index_prefix, threads, min_ani, min_eff_cov } => {
+            (db_path.clone(), bowtie2_index_prefix.clone(), *threads, *min_ani, *min_eff_cov)
+        }
+        _ => bail!("internal error: run_sylph called with non-sylph config"),
+    };
+
+    let fastp = checkpoint
+        .fastp_metrics
+        .as_ref()
+        .context("fastp metrics missing before sylph stage")?;
+
+    let sylph_tsv = work_dir.join("sylph_query.tsv");
+    let mut cmd = Command::new("sylph");
+    cmd.arg("query")
+        .arg(&db_path)
+        .arg("-t").arg(threads.to_string())
+        .arg("-o").arg(&sylph_tsv);
+
+    if sample.is_paired() {
+        cmd.arg("-1").arg(&fastp.output_r1)
+            .arg("-2").arg(fastp.output_r2.as_ref().unwrap());
+    } else {
+        cmd.arg("-r").arg(&fastp.output_r1);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to run sylph query: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(RustycleanError::ToolExecution(format!("sylph query failed: {}", stderr)).into());
+    }
+
+    let (host_positive, max_ani, max_cov) = tokio::task::spawn_blocking({
+        let sylph_tsv = sylph_tsv.clone();
+        move || parse_sylph_query(&sylph_tsv, min_ani, min_eff_cov)
+    })
+    .await
+    .map_err(|e| RustycleanError::ToolExecution(format!("failed to parse sylph output: {}", e)))??;
+
+    info!(
+        sample = %sample.id,
+        host_positive,
+        max_ani = format!("{:.2}", max_ani),
+        max_cov = format!("{:.4}", max_cov),
+        "sylph query complete"
+    );
+
+    if host_positive {
+        let metrics = run_bowtie2_pipeline(sample, fastp, &bowtie2_index_prefix, threads, work_dir).await?;
+        checkpoint.kraken2_metrics = Some(metrics);
+    } else {
+        // No detectable host signal: keep all reads.
+        let total_reads = fastp.output_reads;
+        finalize_host_removal(sample, checkpoint, HashSet::new(), 0, total_reads).await?;
+    }
+
+    validate_and_finalize(sample, checkpoint, config).await?;
+
+    Ok(())
+}
+
+fn parse_sylph_query(path: &Path, min_ani: f64, min_eff_cov: f64) -> Result<(bool, f64, f64)> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to open sylph query output: {}", e)))?;
+    let reader = BufReader::new(file);
+    let mut max_ani = 0.0_f64;
+    let mut max_cov = 0.0_f64;
+    let mut first = true;
+
+    for line in reader.lines() {
+        let line = line.map_err(|e| RustycleanError::ToolExecution(format!("failed to read sylph output: {}", e)))?;
+        if first {
+            first = false;
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 4 {
+            continue;
+        }
+        let ani: f64 = fields[2].parse().unwrap_or(0.0);
+        let cov: f64 = fields[3].parse().unwrap_or(0.0);
+        if ani > max_ani {
+            max_ani = ani;
+        }
+        if cov > max_cov {
+            max_cov = cov;
+        }
+    }
+
+    let host_positive = max_ani >= min_ani && max_cov >= min_eff_cov;
+    Ok((host_positive, max_ani, max_cov))
 }
 
 // ----------------------------------------------------------------------------

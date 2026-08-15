@@ -92,8 +92,18 @@ pub enum HostRemovalConfig {
     },
     #[serde(rename = "sylph")]
     Sylph {
+        /// Sylph sketch database (.syldb) against which the sample is queried.
         db_path: PathBuf,
+        /// Bowtie2 index prefix used for full host removal when sylph signals
+        /// that the sample contains host DNA.
+        bowtie2_index_prefix: PathBuf,
         threads: usize,
+        /// Minimum Adjusted_ANI (%) reported by sylph to treat a sample as
+        /// host-positive.
+        min_ani: f64,
+        /// Minimum effective coverage reported by sylph to treat a sample as
+        /// host-positive.
+        min_eff_cov: f64,
     },
     #[serde(rename = "centrifuge")]
     Centrifuge {

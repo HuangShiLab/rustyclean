@@ -4,7 +4,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "rustyclean")]
-#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/sylph/centrifuge/auto")]
+#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/sylph+bowtie2/centrifuge/auto")]
 #[command(version, arg_required_else_help = true)]
 pub struct Cli {
     /// Forward reads (R1) fastq(.gz) file
@@ -82,11 +82,25 @@ pub struct Cli {
     /// Path to human reference index:
     /// - minimap2: .mmi file
     /// - bowtie2: index prefix
-    /// - sylph: .syldb file
+    /// - sylph: bowtie2 index prefix used for the actual removal step
     /// - centrifuge: index prefix (minus trailing .X.cf)
     /// - auto: bowtie2 index prefix used for the survey and low-host branch
     #[arg(long)]
     pub host_index: Option<PathBuf>,
+
+    /// Sylph database path (.syldb) for the sylph backend.
+    #[arg(long)]
+    pub sylph_db: Option<PathBuf>,
+
+    /// Minimum Adjusted_ANI (%) reported by sylph for a sample to be considered
+    /// host-positive and passed to Bowtie2 removal (default: 95.0).
+    #[arg(long, default_value_t = 95.0)]
+    pub sylph_min_ani: f64,
+
+    /// Minimum effective coverage reported by sylph for a sample to be considered
+    /// host-positive and passed to Bowtie2 removal (default: 0.0005).
+    #[arg(long, default_value_t = 0.0005)]
+    pub sylph_min_cov: f64,
 
     /// Maximum allowed host contamination percent in output (default: 100.0)
     #[arg(long, default_value_t = 100.0)]

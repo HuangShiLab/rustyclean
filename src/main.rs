@@ -94,12 +94,26 @@ async fn main() -> Result<()> {
             }
         }
         HostRemovalModeCli::Sylph => {
-            let db_path = host_index
+            let db_path = cli.sylph_db
+                .unwrap_or_else(|| std::path::PathBuf::from("/db/human_t2t.syldb"));
+            let bowtie2_index_prefix = host_index
                 .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("/db/human_t2t_hla.sylph.syldb"));
+                .unwrap_or_else(|| std::path::PathBuf::from("/db/human_t2t_hla"));
+
+            if !db_path.exists() {
+                bail!("--sylph-db path does not exist: {}", db_path.display());
+            }
+            let bt2_test = bowtie2_index_prefix.with_extension("1.bt2");
+            if !bt2_test.exists() {
+                bail!("bowtie2 index not found at prefix for sylph backend: {}", bowtie2_index_prefix.display());
+            }
+
             HostRemovalConfig::Sylph {
                 db_path,
+                bowtie2_index_prefix,
                 threads: config.tools.host_removal.threads(),
+                min_ani: cli.sylph_min_ani,
+                min_eff_cov: cli.sylph_min_cov,
             }
         }
         HostRemovalModeCli::Centrifuge => {
@@ -303,7 +317,20 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
                 db_path.with_extension("3.cf"),
             ]
         }
-        HostRemovalConfig::Sylph { db_path, .. } => vec![db_path.clone()],
+        HostRemovalConfig::Sylph { db_path, bowtie2_index_prefix, .. } => {
+            // Worst-case memory for the sylph+bowtie2 pipeline: both databases
+            // may need to be resident when sylph signals host presence.
+            let mut paths = vec![db_path.clone()];
+            paths.extend([
+                bowtie2_index_prefix.with_extension("1.bt2"),
+                bowtie2_index_prefix.with_extension("2.bt2"),
+                bowtie2_index_prefix.with_extension("3.bt2"),
+                bowtie2_index_prefix.with_extension("4.bt2"),
+                bowtie2_index_prefix.with_extension("rev.1.bt2"),
+                bowtie2_index_prefix.with_extension("rev.2.bt2"),
+            ]);
+            paths
+        }
     };
 
     let mut total_bytes: u64 = 0;
@@ -347,8 +374,8 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
         HostRemovalConfig::Bowtie2 { index_prefix, .. } => {
             HostRemovalConfig::Bowtie2 { index_prefix, threads }
         }
-        HostRemovalConfig::Sylph { db_path, .. } => {
-            HostRemovalConfig::Sylph { db_path, threads }
+        HostRemovalConfig::Sylph { db_path, bowtie2_index_prefix, min_ani, min_eff_cov, .. } => {
+            HostRemovalConfig::Sylph { db_path, bowtie2_index_prefix, threads, min_ani, min_eff_cov }
         }
         HostRemovalConfig::Centrifuge { db_path, .. } => {
             HostRemovalConfig::Centrifuge { db_path, threads }
@@ -420,7 +447,7 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         }
         HostRemovalConfig::Minimap2 { .. } => vec!["minimap2"],
         HostRemovalConfig::Bowtie2 { .. } => vec!["bowtie2", "samtools"],
-        HostRemovalConfig::Sylph { .. } => vec!["sylph"],
+        HostRemovalConfig::Sylph { .. } => vec!["sylph", "bowtie2", "samtools"],
         HostRemovalConfig::Centrifuge { .. } => vec!["centrifuge"],
         HostRemovalConfig::Auto { .. } => unreachable!(),
     };
