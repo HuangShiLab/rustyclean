@@ -23,8 +23,9 @@ pub struct Cli {
     #[arg(short, long, default_value = "rustyclean_output")]
     pub output: PathBuf,
 
-    /// Host-removal backend. `auto` selects bowtie2/kraken2 based on
-    /// user-provided host percentage or a light-weight survey.
+    /// Host-removal backend. `auto` selects bowtie2 for low-host samples and
+    /// sylph+bowtie2 for high-host samples based on user-provided host
+    /// percentage or a light-weight survey.
     #[arg(long, value_enum, visible_alias = "mode", default_value = "kraken2")]
     pub host_removal_mode: HostRemovalModeCli,
 
@@ -88,7 +89,8 @@ pub struct Cli {
     #[arg(long)]
     pub host_index: Option<PathBuf>,
 
-    /// Sylph database path (.syldb) for the sylph backend.
+    /// Sylph database path (.syldb) for the sylph backend and for the
+    /// high-host branch of auto mode.
     #[arg(long)]
     pub sylph_db: Option<PathBuf>,
 

@@ -112,12 +112,21 @@ pub enum HostRemovalConfig {
     },
     #[serde(rename = "auto")]
     Auto {
-        kraken2_db_path: PathBuf,
+        /// Sylph sketch database used for the default high-host branch.
+        sylph_db_path: PathBuf,
+        /// Bowtie2 index used for actual read-level removal in the sylph branch
+        /// and for the low-host branch.
         bowtie2_index_prefix: PathBuf,
+        /// Optional Kraken2 database kept for backward compatibility / explicit
+        /// fallback. When provided, users can still force the legacy kraken2
+        /// high-host branch via configuration.
+        kraken2_db_path: Option<PathBuf>,
         threads: usize,
         // Thresholds for backend selection
         host_pct_low_threshold: f64,
         host_pct_high_threshold: f64,
+        /// Deprecated: reads threshold used by the legacy kraken2 branch.
+        /// Kept for config compatibility.
         reads_high_threshold: u64,
         // User-provided host percentage (0-100). When Some, survey is skipped.
         user_host_pct: Option<f64>,
@@ -125,6 +134,11 @@ pub enum HostRemovalConfig {
         survey: bool,
         survey_n_reads: u64,
         survey_threads: usize,
+        /// Minimum Adjusted_ANI (%) for the auto sylph branch to treat a sample
+        /// as host-positive.
+        sylph_min_ani: f64,
+        /// Minimum effective coverage for the auto sylph branch.
+        sylph_min_eff_cov: f64,
         /// Use Kraken2 --memory-mapping when the auto backend resolves to kraken2.
         #[serde(default = "default_memory_mapping")]
         memory_mapping: bool,

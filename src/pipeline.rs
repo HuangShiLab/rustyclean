@@ -219,6 +219,7 @@ async fn run_host_removal(
             match &resolved_config.tools.host_removal {
                 HostRemovalConfig::Kraken2 { .. } => run_kraken2(sample, checkpoint, &resolved_config, work_dir).await,
                 HostRemovalConfig::Bowtie2 { .. } => run_bowtie2(sample, checkpoint, &resolved_config, work_dir).await,
+                HostRemovalConfig::Sylph { .. } => run_sylph(sample, checkpoint, &resolved_config, work_dir).await,
                 _ => bail!("internal error: auto mode resolved to unsupported backend: {}", resolved_config.tools.host_removal.mode()),
             }
         }
@@ -229,13 +230,19 @@ async fn run_host_removal(
 // Auto backend resolution
 // ============================================================================
 
-/// Resolve the `auto` backend into a concrete kraken2 or bowtie2 config.
+/// Resolve the `auto` backend into a concrete bowtie2 or sylph config.
 ///
 /// Decision order:
 /// 1. If `user_host_pct` is provided, use it directly.
 /// 2. Else if `survey` is enabled, sample N reads from the fastp-trimmed R1,
 ///    map with bowtie2, and estimate host percentage.
 /// 3. Else fall back to a size-based heuristic using fastp input reads.
+///
+/// Backend selection:
+/// - Low-host samples (< low_thr) use bowtie2 directly.
+/// - High-host samples (> high_thr) use sylph as a fast sample-level prefilter;
+///   host-positive samples are then passed to bowtie2 for read-level removal.
+/// - The legacy kraken2 branch is kept only for explicit fallback configurations.
 async fn resolve_auto_config(
     sample: &Sample,
     checkpoint: &Checkpoint,
@@ -247,8 +254,9 @@ async fn resolve_auto_config(
         _ => bail!("internal error: resolve_auto_config called with non-auto config"),
     };
     let (
-        kraken2_db_path,
+        sylph_db_path,
         bowtie2_index_prefix,
+        kraken2_db_path,
         threads,
         low_thr,
         high_thr,
@@ -257,12 +265,15 @@ async fn resolve_auto_config(
         survey,
         survey_n_reads,
         survey_threads,
+        sylph_min_ani,
+        sylph_min_eff_cov,
         memory_mapping,
         bowtie2_recheck,
     ) = match &auto_cfg {
         HostRemovalConfig::Auto {
-            kraken2_db_path,
+            sylph_db_path,
             bowtie2_index_prefix,
+            kraken2_db_path,
             threads,
             host_pct_low_threshold,
             host_pct_high_threshold,
@@ -271,11 +282,14 @@ async fn resolve_auto_config(
             survey,
             survey_n_reads,
             survey_threads,
+            sylph_min_ani,
+            sylph_min_eff_cov,
             memory_mapping,
             bowtie2_recheck,
         } => (
-            kraken2_db_path.clone(),
+            sylph_db_path.clone(),
             bowtie2_index_prefix.clone(),
+            kraken2_db_path.clone(),
             *threads,
             *host_pct_low_threshold,
             *host_pct_high_threshold,
@@ -284,6 +298,8 @@ async fn resolve_auto_config(
             *survey,
             *survey_n_reads,
             *survey_threads,
+            *sylph_min_ani,
+            *sylph_min_eff_cov,
             *memory_mapping,
             *bowtie2_recheck,
         ),
@@ -329,29 +345,37 @@ async fn resolve_auto_config(
         pct
     };
 
-    let chosen = choose_auto_backend(host_pct, input_reads, low_thr, high_thr, reads_thr);
-    // In auto mode, default to bowtie2 recheck for high-host samples (kraken2 branch).
-    // Users can still force it on for all samples via --bowtie2-recheck.
-    let effective_bowtie2_recheck = bowtie2_recheck || (host_pct > high_thr);
+    let chosen = choose_auto_backend(host_pct, low_thr, high_thr);
     info!(
         sample = %sample.id,
         host_pct = format!("{:.2}", host_pct),
         input_reads = input_reads,
         chosen_backend = chosen,
-        bowtie2_recheck = effective_bowtie2_recheck,
         "auto mode: selected backend"
     );
 
     let resolved = match chosen {
-        "kraken2" => HostRemovalConfig::Kraken2 {
-            db_path: kraken2_db_path,
+        "sylph" => HostRemovalConfig::Sylph {
+            db_path: sylph_db_path,
+            bowtie2_index_prefix,
             threads,
-            confidence_threshold: 0.0,
-            minimum_hit_groups: 2,
-            memory_mapping,
-            bowtie2_recheck: effective_bowtie2_recheck,
-            bowtie2_index_prefix: Some(bowtie2_index_prefix.clone()),
+            min_ani: sylph_min_ani,
+            min_eff_cov: sylph_min_eff_cov,
         },
+        "kraken2" => {
+            let db_path = kraken2_db_path
+                .clone()
+                .context("auto mode requested kraken2 fallback but --kraken2-db was not provided")?;
+            HostRemovalConfig::Kraken2 {
+                db_path,
+                threads,
+                confidence_threshold: 0.0,
+                minimum_hit_groups: 2,
+                memory_mapping,
+                bowtie2_recheck,
+                bowtie2_index_prefix: Some(bowtie2_index_prefix),
+            }
+        }
         _ => HostRemovalConfig::Bowtie2 {
             index_prefix: bowtie2_index_prefix,
             threads,
@@ -363,17 +387,17 @@ async fn resolve_auto_config(
 
 fn choose_auto_backend(
     host_pct: f64,
-    input_reads: u64,
     low_threshold: f64,
     high_threshold: f64,
-    reads_threshold: u64,
 ) -> &'static str {
     if host_pct < low_threshold {
         "bowtie2"
-    } else if host_pct > high_threshold && input_reads > reads_threshold {
-        "kraken2"
+    } else if host_pct > high_threshold {
+        // Default high-host branch: sylph prefilter + bowtie2 removal.
+        "sylph"
     } else {
-        // Conservative default: bowtie2 unless clearly a large high-host sample.
+        // Mid-range host contamination: bowtie2 is robust and avoids the
+        // overhead of loading the sylph database for borderline cases.
         "bowtie2"
     }
 }

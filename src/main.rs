@@ -126,36 +126,52 @@ async fn main() -> Result<()> {
             }
         }
         HostRemovalModeCli::Auto => {
-            let kraken2_db_path = cli.kraken2_db.unwrap_or_else(|| {
-                match &config.tools.host_removal {
-                    HostRemovalConfig::Kraken2 { db_path, .. } => db_path.clone(),
-                    HostRemovalConfig::Auto { kraken2_db_path, .. } => kraken2_db_path.clone(),
-                    _ => std::path::PathBuf::from("/db/minikraken2_v2_8GB"),
-                }
-            });
+            let sylph_db_path = cli.sylph_db
+                .unwrap_or_else(|| {
+                    match &config.tools.host_removal {
+                        HostRemovalConfig::Sylph { db_path, .. } => db_path.clone(),
+                        HostRemovalConfig::Auto { sylph_db_path, .. } => sylph_db_path.clone(),
+                        _ => std::path::PathBuf::from("/db/human_t2t.syldb"),
+                    }
+                });
             let bowtie2_index_prefix = host_index
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| {
                     match &config.tools.host_removal {
                         HostRemovalConfig::Bowtie2 { index_prefix, .. } => index_prefix.clone(),
+                        HostRemovalConfig::Sylph { bowtie2_index_prefix, .. } => bowtie2_index_prefix.clone(),
                         HostRemovalConfig::Auto { bowtie2_index_prefix, .. } => bowtie2_index_prefix.clone(),
                         _ => std::path::PathBuf::from("/db/human_t2t_hla"),
                     }
                 });
+            // Optional Kraken2 database for explicit fallback. If not provided,
+            // auto mode simply cannot fall back to kraken2.
+            let kraken2_db_path = cli.kraken2_db.or_else(|| {
+                match &config.tools.host_removal {
+                    HostRemovalConfig::Kraken2 { db_path, .. } => Some(db_path.clone()),
+                    HostRemovalConfig::Auto { kraken2_db_path, .. } => kraken2_db_path.clone(),
+                    _ => None,
+                }
+            });
 
-            // Validate that both required databases are available for auto mode.
-            if !kraken2_db_path.exists() {
-                bail!("--kraken2-db path does not exist: {}", kraken2_db_path.display());
+            // Validate required databases for auto mode.
+            if !sylph_db_path.exists() {
+                bail!("--sylph-db path does not exist: {}", sylph_db_path.display());
             }
-            // bowtie2 index prefix: check at least the .1.bt2 file exists
             let bt2_test = bowtie2_index_prefix.with_extension("1.bt2");
             if !bt2_test.exists() {
                 bail!("bowtie2 index not found at prefix: {}", bowtie2_index_prefix.display());
             }
+            if let Some(ref kdb) = kraken2_db_path {
+                if !kdb.exists() {
+                    bail!("--kraken2-db path does not exist: {}", kdb.display());
+                }
+            }
 
             HostRemovalConfig::Auto {
-                kraken2_db_path,
+                sylph_db_path,
                 bowtie2_index_prefix,
+                kraken2_db_path,
                 threads: config.tools.host_removal.threads(),
                 host_pct_low_threshold: cli.auto_low_threshold,
                 host_pct_high_threshold: cli.auto_high_threshold,
@@ -164,6 +180,8 @@ async fn main() -> Result<()> {
                 survey: cli.auto_survey,
                 survey_n_reads: cli.auto_survey_nreads,
                 survey_threads: cli.auto_survey_threads,
+                sylph_min_ani: cli.sylph_min_ani,
+                sylph_min_eff_cov: cli.sylph_min_cov,
                 memory_mapping: cli.kraken2_memory_mapping,
                 bowtie2_recheck: cli.bowtie2_recheck,
             }
@@ -295,9 +313,18 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
         HostRemovalConfig::Kraken2 { db_path, .. } => {
             vec![db_path.join("hash.k2d")]
         }
-        HostRemovalConfig::Auto { kraken2_db_path, .. } => {
-            // Auto mode's memory peak is dominated by the Kraken2 branch.
-            vec![kraken2_db_path.join("hash.k2d")]
+        HostRemovalConfig::Auto { sylph_db_path, bowtie2_index_prefix, .. } => {
+            // Auto mode's memory peak is dominated by the sylph+bowtie2 branch.
+            let mut paths = vec![sylph_db_path.clone()];
+            paths.extend([
+                bowtie2_index_prefix.with_extension("1.bt2"),
+                bowtie2_index_prefix.with_extension("2.bt2"),
+                bowtie2_index_prefix.with_extension("3.bt2"),
+                bowtie2_index_prefix.with_extension("4.bt2"),
+                bowtie2_index_prefix.with_extension("rev.1.bt2"),
+                bowtie2_index_prefix.with_extension("rev.2.bt2"),
+            ]);
+            paths
         }
         HostRemovalConfig::Bowtie2 { index_prefix, .. } => {
             vec![
@@ -381,8 +408,9 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
             HostRemovalConfig::Centrifuge { db_path, threads }
         }
         HostRemovalConfig::Auto {
-            kraken2_db_path,
+            sylph_db_path,
             bowtie2_index_prefix,
+            kraken2_db_path,
             host_pct_low_threshold,
             host_pct_high_threshold,
             reads_high_threshold,
@@ -390,13 +418,16 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
             survey,
             survey_n_reads,
             survey_threads,
+            sylph_min_ani,
+            sylph_min_eff_cov,
             memory_mapping,
             bowtie2_recheck,
             ..
         } => {
             HostRemovalConfig::Auto {
-                kraken2_db_path,
+                sylph_db_path,
                 bowtie2_index_prefix,
+                kraken2_db_path,
                 threads,
                 host_pct_low_threshold,
                 host_pct_high_threshold,
@@ -405,6 +436,8 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
                 survey,
                 survey_n_reads,
                 survey_threads,
+                sylph_min_ani,
+                sylph_min_eff_cov,
                 memory_mapping,
                 bowtie2_recheck,
             }
@@ -424,14 +457,20 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         }
     }
 
-    // For auto mode, both bowtie2 and kraken2 must be available.
+    // For auto mode, sylph and bowtie2 are required; kraken2 is only needed
+    // when an explicit fallback is configured.
     if matches!(host_removal, HostRemovalConfig::Auto { .. }) {
-        for tool in &["bowtie2", "kraken2"] {
+        for tool in &["sylph", "bowtie2", "samtools"] {
             which::which(tool).map_err(|_| {
                 anyhow::anyhow!(
-                    "'{}' not found in PATH. Auto mode requires both bowtie2 and kraken2.",
+                    "'{}' not found in PATH. Auto mode requires sylph, bowtie2 and samtools.",
                     tool
                 )
+            })?;
+        }
+        if let HostRemovalConfig::Auto { kraken2_db_path: Some(_), .. } = host_removal {
+            which::which("kraken2").map_err(|_| {
+                anyhow::anyhow!("'kraken2' not found in PATH but --kraken2-db was provided for auto mode fallback.")
             })?;
         }
         return Ok(());
