@@ -864,6 +864,10 @@ async fn run_kraken2(
         .await
         .map_err(|e| RustycleanError::ToolExecution(format!("failed to run kraken2: {}", e)))?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(RustycleanError::ToolExecution(format!("kraken2 exited with status {:?}: {}", output.status, stderr)).into());
+    }
     let stderr = String::from_utf8_lossy(&output.stderr);
     if stderr.contains("Error:") || stderr.contains("FATAL") {
         return Err(RustycleanError::ToolExecution(stderr.to_string()).into());
