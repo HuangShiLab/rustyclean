@@ -230,7 +230,7 @@ async fn run_host_removal(
 // Auto backend resolution
 // ============================================================================
 
-/// Resolve the `auto` backend into a concrete bowtie2 or sylph config.
+/// Resolve the `auto` backend into a concrete bowtie2 or kraken2 config.
 ///
 /// Decision order:
 /// 1. If `user_host_pct` is provided, use it directly.
@@ -240,9 +240,8 @@ async fn run_host_removal(
 ///
 /// Backend selection:
 /// - Low-host samples (< low_thr) use bowtie2 directly.
-/// - High-host samples (> high_thr) use sylph as a fast sample-level prefilter;
-///   host-positive samples are then passed to bowtie2 for read-level removal.
-/// - The legacy kraken2 branch is kept only for explicit fallback configurations.
+/// - High-host samples (> high_thr) use kraken2 with optional bowtie2 recheck.
+/// - Mid-range host contamination uses bowtie2 for robustness.
 async fn resolve_auto_config(
     sample: &Sample,
     checkpoint: &Checkpoint,
@@ -393,11 +392,12 @@ fn choose_auto_backend(
     if host_pct < low_threshold {
         "bowtie2"
     } else if host_pct > high_threshold {
-        // Default high-host branch: sylph prefilter + bowtie2 removal.
-        "sylph"
+        // High-host branch: kraken2 for speed, with bowtie2 recheck of
+        // unclassified reads to maintain accuracy.
+        "kraken2"
     } else {
-        // Mid-range host contamination: bowtie2 is robust and avoids the
-        // overhead of loading the sylph database for borderline cases.
+        // Mid-range host contamination: bowtie2 is robust and avoids loading
+        // the larger kraken2 database for borderline cases.
         "bowtie2"
     }
 }
@@ -1149,15 +1149,14 @@ async fn run_bowtie2_pipeline(
         None
     };
 
-    let count_before = work_dir.join("bowtie2_count_before.txt");
-    let count_after = work_dir.join("bowtie2_count_after.txt");
-
     let index = index_prefix.display().to_string();
     let r1 = fastp.output_r1.display().to_string();
     let t = threads.to_string();
-    let c_before = count_before.display().to_string();
-    let c_after = count_after.display().to_string();
 
+    // Stream through bowtie2 -> unmapped-only SAM -> FASTQ.  Avoid process
+    // substitutions inside the shell pipeline; they can hang on Lustre when
+    // the clean output is empty or near-empty because bash waits for the
+    // substituted processes to drain FIFOs.
     let pipeline = if sample.is_paired() {
         let r2 = fastp.output_r2.as_ref().unwrap().display().to_string();
         let out1 = final_r1.display().to_string();
@@ -1166,12 +1165,10 @@ async fn run_bowtie2_pipeline(
             concat!(
                 "set -euo pipefail; ",
                 "bowtie2 -x \"{}\" -1 \"{}\" -2 \"{}\" --very-fast-local -p {} -k 1 --mm ",
-                "  | tee >(samtools view -F 2304 -c - > \"{}\") ",
-                "  | samtools view -hf 12 - ",
-                "  | tee >(samtools view -F 2304 -c - > \"{}\") ",
-                "  | samtools fastq --threads {} -c 6 -1 \"{}\" -2 \"{}\" -0 /dev/null -s /dev/null"
+                "| samtools view -hf 12 - ",
+                "| samtools fastq --threads {} -c 6 -1 \"{}\" -2 \"{}\" -0 /dev/null -s /dev/null"
             ),
-            index, r1, r2, t, c_before, c_after, t, out1, out2
+            index, r1, r2, t, t, out1, out2
         )
     } else {
         let out1 = final_r1.display().to_string();
@@ -1179,12 +1176,10 @@ async fn run_bowtie2_pipeline(
             concat!(
                 "set -euo pipefail; ",
                 "bowtie2 -x \"{}\" -U \"{}\" --very-fast-local -p {} -k 1 --mm ",
-                "  | tee >(samtools view -F 2304 -c - > \"{}\") ",
-                "  | samtools view -hf 4 - ",
-                "  | tee >(samtools view -F 2304 -c - > \"{}\") ",
-                "  | samtools fastq --threads {} -c 6 -0 \"{}\""
+                "| samtools view -hf 4 - ",
+                "| samtools fastq --threads {} -c 6 -0 \"{}\""
             ),
-            index, r1, t, c_before, c_after, t, out1
+            index, r1, t, t, out1
         )
     };
     let output = Command::new("bash")
@@ -1199,8 +1194,17 @@ async fn run_bowtie2_pipeline(
         return Err(RustycleanError::ToolExecution(format!("bowtie2 streaming pipeline failed: {}", stderr)).into());
     }
 
-    let before = read_count_file(&count_before).await?;
-    let after = read_count_file(&count_after).await?;
+    // Derive counts from the input metrics and the written clean FASTQ.  For
+    // PE data fastp reports reads (R1 + R2), so divide by two to get pairs.
+    let input_total = fastp.output_reads;
+    let (before, after) = if sample.is_paired() {
+        let before = input_total / 2;
+        let after = count_fastq_records(&final_r1)?;
+        (before, after)
+    } else {
+        (input_total, count_fastq_records(&final_r1)?)
+    };
+
     let classified_reads = before.saturating_sub(after);
     let unclassified_reads = after;
     let total = before;

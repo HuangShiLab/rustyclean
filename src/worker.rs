@@ -94,14 +94,14 @@ pub async fn run_pipeline(
     let cancel = tokio_util::sync::CancellationToken::new();
 
     // Install Ctrl-C handler
-    {
+    let ctrl_c_handle = {
         let cancel = cancel.clone();
         tokio::spawn(async move {
             let _ = tokio::signal::ctrl_c().await;
             warn!("Ctrl-C received, cancelling remaining work...");
             cancel.cancel();
-        });
-    }
+        })
+    };
 
     let mut handles = Vec::with_capacity(total);
 
@@ -197,6 +197,11 @@ pub async fn run_pipeline(
     for handle in handles {
         let _ = handle.await;
     }
+
+    // The Ctrl-C listener task would otherwise keep the tokio runtime alive
+    // after all pipeline work has finished, causing the process to hang.
+    ctrl_c_handle.abort();
+    let _ = ctrl_c_handle.await;
 
     progress.report_final();
 

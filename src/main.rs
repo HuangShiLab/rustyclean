@@ -154,10 +154,9 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Validate required databases for auto mode.
-            if !sylph_db_path.exists() {
-                bail!("--sylph-db path does not exist: {}", sylph_db_path.display());
-            }
+            // Validate required databases for auto mode. sylph-db is optional
+            // because auto mode now defaults to kraken2 for high-host samples;
+            // sylph is only required when explicitly selected as the backend.
             let bt2_test = bowtie2_index_prefix.with_extension("1.bt2");
             if !bt2_test.exists() {
                 bail!("bowtie2 index not found at prefix: {}", bowtie2_index_prefix.display());
@@ -457,20 +456,20 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         }
     }
 
-    // For auto mode, sylph and bowtie2 are required; kraken2 is only needed
-    // when an explicit fallback is configured.
+    // For auto mode, bowtie2 and samtools are always required; kraken2 is
+    // required when a kraken2 database is provided (default high-host branch).
     if matches!(host_removal, HostRemovalConfig::Auto { .. }) {
-        for tool in &["sylph", "bowtie2", "samtools"] {
+        for tool in &["bowtie2", "samtools"] {
             which::which(tool).map_err(|_| {
                 anyhow::anyhow!(
-                    "'{}' not found in PATH. Auto mode requires sylph, bowtie2 and samtools.",
+                    "'{}' not found in PATH. Auto mode requires bowtie2 and samtools.",
                     tool
                 )
             })?;
         }
         if let HostRemovalConfig::Auto { kraken2_db_path: Some(_), .. } = host_removal {
             which::which("kraken2").map_err(|_| {
-                anyhow::anyhow!("'kraken2' not found in PATH but --kraken2-db was provided for auto mode fallback.")
+                anyhow::anyhow!("'kraken2' not found in PATH but --kraken2-db was provided for auto mode.")
             })?;
         }
         return Ok(());
