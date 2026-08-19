@@ -4,7 +4,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "rustyclean")]
-#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/sylph+bowtie2/centrifuge/auto")]
+#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/kraken2+bowtie2-recheck/centrifuge/auto")]
 #[command(version, arg_required_else_help = true)]
 pub struct Cli {
     /// Forward reads (R1) fastq(.gz) file
@@ -24,7 +24,7 @@ pub struct Cli {
     pub output: PathBuf,
 
     /// Host-removal backend. `auto` selects bowtie2 for low-host samples and
-    /// sylph+bowtie2 for high-host samples based on user-provided host
+    /// kraken2 with bowtie2 recheck for high-host samples based on user-provided host
     /// percentage or a light-weight survey.
     #[arg(long, value_enum, visible_alias = "mode", default_value = "kraken2")]
     pub host_removal_mode: HostRemovalModeCli,
