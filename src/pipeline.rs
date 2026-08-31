@@ -344,7 +344,7 @@ async fn resolve_auto_config(
         pct
     };
 
-    let chosen = choose_auto_backend(host_pct, low_thr, high_thr);
+    let chosen = choose_auto_backend(host_pct, input_reads, low_thr, high_thr, reads_thr);
     info!(
         sample = %sample.id,
         host_pct = format!("{:.2}", host_pct),
@@ -386,18 +386,23 @@ async fn resolve_auto_config(
 
 fn choose_auto_backend(
     host_pct: f64,
+    input_reads: u64,
     low_threshold: f64,
     high_threshold: f64,
+    reads_threshold: u64,
 ) -> &'static str {
     if host_pct < low_threshold {
         "bowtie2"
-    } else if host_pct > high_threshold {
+    } else if host_pct > high_threshold && input_reads > reads_threshold {
         // High-host branch: kraken2 for speed, with bowtie2 recheck of
-        // unclassified reads to maintain accuracy.
+        // unclassified reads to maintain accuracy. Loading the kraken2
+        // database only pays off once the library is large enough to
+        // amortise it, hence the read-count condition.
         "kraken2"
     } else {
-        // Mid-range host contamination: bowtie2 is robust and avoids loading
-        // the larger kraken2 database for borderline cases.
+        // Mid-range host contamination, or a library too small to amortise
+        // the database load: bowtie2 is robust and avoids loading the
+        // larger kraken2 database for borderline cases.
         "bowtie2"
     }
 }
