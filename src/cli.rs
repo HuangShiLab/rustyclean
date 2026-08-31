@@ -75,10 +75,17 @@ pub struct Cli {
     /// After Kraken2 classification, re-align reads classified as unclassified
     /// by Kraken2 with Bowtie2 against the host index. This catches host reads
     /// that Kraken2 could not confidently classify, at the cost of additional
-    /// runtime. In auto mode this is enabled by default when the estimated host
-    /// fraction exceeds the high threshold (default: disabled for manual kraken2).
-    #[arg(long, default_value_t = false)]
+    /// runtime.
+    ///
+    /// Enabled by default; disable with --no-bowtie2-recheck. Passing this flag
+    /// explicitly makes the host index mandatory, whereas the default quietly
+    /// steps aside when no --host-index is available.
+    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "no_bowtie2_recheck")]
     pub bowtie2_recheck: bool,
+
+    /// Skip the Bowtie2 verification pass on the Kraken2 classification path.
+    #[arg(long, action = clap::ArgAction::SetTrue)]
+    pub no_bowtie2_recheck: bool,
 
     /// Path to human reference index:
     /// - minimap2: .mmi file
@@ -152,4 +159,69 @@ pub enum HostRemovalModeCli {
     Sylph,
     Centrifuge,
     Auto,
+}
+
+impl Cli {
+    /// Whether the Bowtie2 verification pass should run.
+    ///
+    /// On by default. `--no-bowtie2-recheck` turns it off. It also turns itself
+    /// off when no host index is configured, unless the user asked for it
+    /// explicitly, in which case the missing index is an error raised later.
+    pub fn bowtie2_recheck_enabled(&self) -> bool {
+        if self.no_bowtie2_recheck {
+            return false;
+        }
+        if self.host_index.is_none() && !self.bowtie2_recheck {
+            return false;
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod recheck_flag_tests {
+    use super::*;
+    use clap::Parser;
+
+    fn cli(extra: &[&str]) -> Cli {
+        let mut argv = vec!["rustyclean", "--r1", "x.fq.gz", "--kraken2-db", "/db"];
+        argv.extend_from_slice(extra);
+        Cli::try_parse_from(argv).expect("args should parse")
+    }
+
+    #[test]
+    fn on_by_default_when_a_host_index_is_present() {
+        assert!(cli(&["--host-index", "/idx"]).bowtie2_recheck_enabled());
+    }
+
+    #[test]
+    fn explicit_flag_keeps_it_on() {
+        assert!(cli(&["--host-index", "/idx", "--bowtie2-recheck"]).bowtie2_recheck_enabled());
+    }
+
+    #[test]
+    fn negation_turns_it_off() {
+        assert!(!cli(&["--host-index", "/idx", "--no-bowtie2-recheck"]).bowtie2_recheck_enabled());
+    }
+
+    #[test]
+    fn stands_down_when_no_host_index_is_configured() {
+        // Default-on must not break runs that never supplied an index.
+        assert!(!cli(&[]).bowtie2_recheck_enabled());
+    }
+
+    #[test]
+    fn explicit_request_without_an_index_stays_on_so_the_error_surfaces() {
+        // The user asked for it; the missing index is reported downstream
+        // rather than silently ignored.
+        assert!(cli(&["--bowtie2-recheck"]).bowtie2_recheck_enabled());
+    }
+
+    #[test]
+    fn the_two_flags_are_mutually_exclusive() {
+        assert!(Cli::try_parse_from([
+            "rustyclean", "--r1", "x.fq.gz", "--kraken2-db", "/db",
+            "--bowtie2-recheck", "--no-bowtie2-recheck",
+        ]).is_err());
+    }
 }

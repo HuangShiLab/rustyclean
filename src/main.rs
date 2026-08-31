@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::checkpoint::CheckpointManager;
@@ -29,6 +29,19 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
+
+
+    // Verification pass is on by default; --no-bowtie2-recheck turns it off,
+
+    // and it stands down on its own when no host index is configured.
+
+    let recheck_enabled = cli.bowtie2_recheck_enabled();
+
+    if !recheck_enabled && !cli.no_bowtie2_recheck && cli.host_index.is_none() {
+
+        warn!("no --host-index configured; the Bowtie2 verification pass is disabled");
+
+    }
     // Load or build config
     let mut config = if let Some(config_path) = &cli.config {
         let content = tokio::fs::read_to_string(config_path).await?;
@@ -71,7 +84,7 @@ async fn main() -> Result<()> {
                 confidence_threshold: 0.0,
                 minimum_hit_groups: 2,
                 memory_mapping: cli.kraken2_memory_mapping,
-                bowtie2_recheck: cli.bowtie2_recheck,
+                bowtie2_recheck: recheck_enabled,
                 bowtie2_index_prefix: cli.host_index.clone(),
             }
         }
@@ -182,7 +195,7 @@ async fn main() -> Result<()> {
                 sylph_min_ani: cli.sylph_min_ani,
                 sylph_min_eff_cov: cli.sylph_min_cov,
                 memory_mapping: cli.kraken2_memory_mapping,
-                bowtie2_recheck: cli.bowtie2_recheck,
+                bowtie2_recheck: recheck_enabled,
             }
         }
     };
