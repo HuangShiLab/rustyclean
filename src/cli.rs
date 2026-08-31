@@ -73,19 +73,15 @@ pub struct Cli {
     pub kraken2_memory_mapping: bool,
 
     /// After Kraken2 classification, re-align reads classified as unclassified
-    /// by Kraken2 with Bowtie2 against the host index. This catches host reads
-    /// that Kraken2 could not confidently classify, at the cost of additional
-    /// runtime.
+    /// by Kraken2 with Bowtie2 against the index given here. This catches host
+    /// reads that Kraken2 could not confidently classify, at the cost of
+    /// additional runtime.
     ///
-    /// Enabled by default; disable with --no-bowtie2-recheck. Passing this flag
-    /// explicitly makes the host index mandatory, whereas the default quietly
-    /// steps aside when no --host-index is available.
-    #[arg(long, action = clap::ArgAction::SetTrue, conflicts_with = "no_bowtie2_recheck")]
-    pub bowtie2_recheck: bool,
-
-    /// Skip the Bowtie2 verification pass on the Kraken2 classification path.
-    #[arg(long, action = clap::ArgAction::SetTrue)]
-    pub no_bowtie2_recheck: bool,
+    /// Supplying a Bowtie2 index prefix enables the pass; omitting the flag
+    /// disables it. The index may differ from --host-index, so the survey and
+    /// the verification pass can use different references.
+    #[arg(long, value_name = "BOWTIE2_INDEX_PREFIX")]
+    pub bowtie2_recheck: Option<PathBuf>,
 
     /// Path to human reference index:
     /// - minimap2: .mmi file
@@ -161,22 +157,7 @@ pub enum HostRemovalModeCli {
     Auto,
 }
 
-impl Cli {
-    /// Whether the Bowtie2 verification pass should run.
-    ///
-    /// On by default. `--no-bowtie2-recheck` turns it off. It also turns itself
-    /// off when no host index is configured, unless the user asked for it
-    /// explicitly, in which case the missing index is an error raised later.
-    pub fn bowtie2_recheck_enabled(&self) -> bool {
-        if self.no_bowtie2_recheck {
-            return false;
-        }
-        if self.host_index.is_none() && !self.bowtie2_recheck {
-            return false;
-        }
-        true
-    }
-}
+
 
 #[cfg(test)]
 mod recheck_flag_tests {
@@ -190,38 +171,27 @@ mod recheck_flag_tests {
     }
 
     #[test]
-    fn on_by_default_when_a_host_index_is_present() {
-        assert!(cli(&["--host-index", "/idx"]).bowtie2_recheck_enabled());
+    fn absent_flag_disables_the_pass() {
+        assert!(cli(&[]).bowtie2_recheck.is_none());
     }
 
     #[test]
-    fn explicit_flag_keeps_it_on() {
-        assert!(cli(&["--host-index", "/idx", "--bowtie2-recheck"]).bowtie2_recheck_enabled());
+    fn supplying_an_index_enables_the_pass_and_carries_it() {
+        let c = cli(&["--bowtie2-recheck", "/db/human_t2t_hla"]);
+        assert_eq!(c.bowtie2_recheck.as_deref(), Some(std::path::Path::new("/db/human_t2t_hla")));
     }
 
     #[test]
-    fn negation_turns_it_off() {
-        assert!(!cli(&["--host-index", "/idx", "--no-bowtie2-recheck"]).bowtie2_recheck_enabled());
+    fn the_flag_requires_a_value() {
+        assert!(Cli::try_parse_from(
+            ["rustyclean", "--r1", "x.fq.gz", "--kraken2-db", "/db", "--bowtie2-recheck"]
+        ).is_err());
     }
 
     #[test]
-    fn stands_down_when_no_host_index_is_configured() {
-        // Default-on must not break runs that never supplied an index.
-        assert!(!cli(&[]).bowtie2_recheck_enabled());
-    }
-
-    #[test]
-    fn explicit_request_without_an_index_stays_on_so_the_error_surfaces() {
-        // The user asked for it; the missing index is reported downstream
-        // rather than silently ignored.
-        assert!(cli(&["--bowtie2-recheck"]).bowtie2_recheck_enabled());
-    }
-
-    #[test]
-    fn the_two_flags_are_mutually_exclusive() {
-        assert!(Cli::try_parse_from([
-            "rustyclean", "--r1", "x.fq.gz", "--kraken2-db", "/db",
-            "--bowtie2-recheck", "--no-bowtie2-recheck",
-        ]).is_err());
+    fn recheck_index_is_independent_of_host_index() {
+        let c = cli(&["--host-index", "/idx/survey", "--bowtie2-recheck", "/idx/verify"]);
+        assert_eq!(c.host_index.as_deref(), Some(std::path::Path::new("/idx/survey")));
+        assert_eq!(c.bowtie2_recheck.as_deref(), Some(std::path::Path::new("/idx/verify")));
     }
 }

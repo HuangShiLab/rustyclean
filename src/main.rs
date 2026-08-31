@@ -28,20 +28,8 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-
-
-
-    // Verification pass is on by default; --no-bowtie2-recheck turns it off,
-
-    // and it stands down on its own when no host index is configured.
-
-    let recheck_enabled = cli.bowtie2_recheck_enabled();
-
-    if !recheck_enabled && !cli.no_bowtie2_recheck && cli.host_index.is_none() {
-
-        warn!("no --host-index configured; the Bowtie2 verification pass is disabled");
-
-    }
+    // The verification pass is enabled by supplying its index; no flag, no pass.
+    let recheck_enabled = cli.bowtie2_recheck.is_some();
     // Load or build config
     let mut config = if let Some(config_path) = &cli.config {
         let content = tokio::fs::read_to_string(config_path).await?;
@@ -85,7 +73,7 @@ async fn main() -> Result<()> {
                 minimum_hit_groups: 2,
                 memory_mapping: cli.kraken2_memory_mapping,
                 bowtie2_recheck: recheck_enabled,
-                bowtie2_index_prefix: cli.host_index.clone(),
+                bowtie2_index_prefix: cli.bowtie2_recheck.clone(),
             }
         }
         HostRemovalModeCli::Minimap2 => {
@@ -196,6 +184,7 @@ async fn main() -> Result<()> {
                 sylph_min_eff_cov: cli.sylph_min_cov,
                 memory_mapping: cli.kraken2_memory_mapping,
                 bowtie2_recheck: recheck_enabled,
+                bowtie2_recheck_index: cli.bowtie2_recheck.clone(),
             }
         }
     };
@@ -434,6 +423,7 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
             sylph_min_eff_cov,
             memory_mapping,
             bowtie2_recheck,
+            bowtie2_recheck_index,
             ..
         } => {
             HostRemovalConfig::Auto {
@@ -452,6 +442,7 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
                 sylph_min_eff_cov,
                 memory_mapping,
                 bowtie2_recheck,
+                bowtie2_recheck_index,
             }
         }
     }

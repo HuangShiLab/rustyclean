@@ -268,6 +268,7 @@ async fn resolve_auto_config(
         sylph_min_eff_cov,
         memory_mapping,
         bowtie2_recheck,
+        bowtie2_recheck_index,
     ) = match &auto_cfg {
         HostRemovalConfig::Auto {
             sylph_db_path,
@@ -285,6 +286,7 @@ async fn resolve_auto_config(
             sylph_min_eff_cov,
             memory_mapping,
             bowtie2_recheck,
+            bowtie2_recheck_index,
         } => (
             sylph_db_path.clone(),
             bowtie2_index_prefix.clone(),
@@ -301,6 +303,7 @@ async fn resolve_auto_config(
             *sylph_min_eff_cov,
             *memory_mapping,
             *bowtie2_recheck,
+            bowtie2_recheck_index.clone(),
         ),
         _ => unreachable!(),
     };
@@ -372,7 +375,9 @@ async fn resolve_auto_config(
                 minimum_hit_groups: 2,
                 memory_mapping,
                 bowtie2_recheck,
-                bowtie2_index_prefix: Some(bowtie2_index_prefix),
+                bowtie2_index_prefix: bowtie2_recheck_index
+                    .clone()
+                    .or(Some(bowtie2_index_prefix)),
             }
         }
         _ => HostRemovalConfig::Bowtie2 {

@@ -139,6 +139,10 @@ pub enum HostRemovalConfig {
         sylph_min_ani: f64,
         /// Minimum effective coverage for the auto sylph branch.
         sylph_min_eff_cov: f64,
+        /// Bowtie2 index used by the verification pass when the auto backend
+        /// resolves to kraken2. `None` disables the pass.
+        #[serde(default)]
+        bowtie2_recheck_index: Option<PathBuf>,
         /// Use Kraken2 --memory-mapping when the auto backend resolves to kraken2.
         #[serde(default = "default_memory_mapping")]
         memory_mapping: bool,
