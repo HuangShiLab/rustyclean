@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
@@ -12,7 +12,7 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::{Config, HostRemovalConfig};
 use crate::error::RustycleanError;
@@ -837,6 +837,15 @@ async fn run_kraken2(
     let kraken_report = work_dir.join("kraken2.report");
     let kraken_output = work_dir.join("kraken2.output.txt");
 
+    // Which taxids count as host for this database (see resolve_host_taxids).
+    let host_taxids = resolve_host_taxids(&db_path, HUMAN_TAXID as i64);
+    info!(
+        db = %db_path.display(),
+        host_taxid = HUMAN_TAXID,
+        resolved_taxids = host_taxids.len(),
+        "kraken2: resolved host taxid set"
+    );
+
     let mut cmd = Command::new("kraken2");
     cmd.arg("--db")
         .arg(&db_path)
@@ -881,7 +890,8 @@ async fn run_kraken2(
     // Parse Kraken2 per-read output to identify human and unclassified reads
     let classification = tokio::task::spawn_blocking({
         let kraken_output = kraken_output.clone();
-        move || parse_kraken_output(&kraken_output)
+        let host_taxids = host_taxids.clone();
+        move || parse_kraken_output(&kraken_output, &host_taxids)
     })
     .await
     .map_err(|e| RustycleanError::ToolExecution(format!("failed to parse kraken2 output: {}", e)))??;
@@ -1020,7 +1030,136 @@ struct Kraken2ReadClassification {
     unclassified_ids: HashSet<String>,
 }
 
-fn parse_kraken_output(path: &Path) -> Result<Kraken2ReadClassification> {
+/// Taxids that should be treated as host for a given host taxon.
+///
+/// Kraken2 assigns each read the LCA of its k-mer hits. With a mixed database a
+/// genuine host read whose k-mers are shared with other taxa is assigned to an
+/// ancestor of the host taxon (Homo, Hominidae, Primates, Eukaryota, ...) rather
+/// than to the host taxon itself, and an exact-match test silently retains it.
+///
+/// The set returned here contains:
+///   * the host taxon itself,
+///   * every descendant of it present in the taxonomy, and
+///   * every ancestor of it for which the host clade is the *only* part of the
+///     database underneath — i.e. an ancestor is safe to treat as host exactly
+///     when no non-host library sequence sits below it.
+///
+/// For a host-only database this makes the whole lineage host, which is correct.
+/// For a mixed database only genuinely unambiguous ancestors are included.
+///
+/// Falls back to `{host_taxid}` alone when the database ships no taxonomy, which
+/// reproduces the previous behaviour.
+fn resolve_host_taxids(db_path: &Path, host_taxid: i64) -> HashSet<i64> {
+    let mut only_self = HashSet::new();
+    only_self.insert(host_taxid);
+
+    let nodes = db_path.join("taxonomy").join("nodes.dmp");
+    let nodes = if nodes.exists() { nodes } else { db_path.join("nodes.dmp") };
+    let parent = match read_taxonomy_parents(&nodes) {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            warn!(
+                db = %db_path.display(),
+                "no nodes.dmp found next to the Kraken2 database; host detection falls \
+                 back to an exact taxid match and may retain host reads that Kraken2 \
+                 assigned to an ancestor taxon"
+            );
+            return only_self;
+        }
+    };
+
+    // children map
+    let mut children: HashMap<i64, Vec<i64>> = HashMap::new();
+    for (&child, &par) in parent.iter() {
+        if child != par {
+            children.entry(par).or_default().push(child);
+        }
+    }
+
+    // host clade = host taxon and everything below it
+    let mut clade: HashSet<i64> = HashSet::new();
+    let mut stack = vec![host_taxid];
+    while let Some(t) = stack.pop() {
+        if !clade.insert(t) {
+            continue;
+        }
+        if let Some(kids) = children.get(&t) {
+            stack.extend(kids.iter().copied());
+        }
+    }
+
+    // taxids actually represented in the database
+    let lib = read_library_taxids(db_path);
+
+    // walk from the host taxon to the root, keeping ancestors that have no
+    // non-host library taxid beneath them
+    let mut host_set = clade.clone();
+    let mut node = host_taxid;
+    let mut guard = 0;
+    while let Some(&par) = parent.get(&node) {
+        if par == node || guard > 256 {
+            break;
+        }
+        guard += 1;
+        if lib.is_empty() {
+            // No library inventory: only accept ancestors when the database is
+            // known to contain nothing else, which we cannot establish. Stop.
+            break;
+        }
+        let mut below: HashSet<i64> = HashSet::new();
+        let mut st = vec![par];
+        while let Some(t) = st.pop() {
+            if !below.insert(t) {
+                continue;
+            }
+            if let Some(kids) = children.get(&t) {
+                st.extend(kids.iter().copied());
+            }
+        }
+        let has_foreign = lib.iter().any(|t| below.contains(t) && !clade.contains(t));
+        if has_foreign {
+            break;
+        }
+        host_set.insert(par);
+        node = par;
+    }
+
+    host_set
+}
+
+/// Parse `child\tparent` relations out of an NCBI `nodes.dmp`.
+fn read_taxonomy_parents(path: &Path) -> Result<HashMap<i64, i64>> {
+    let file = std::fs::File::open(path)?;
+    let mut map = HashMap::new();
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let mut it = line.split('|');
+        let child = it.next().unwrap_or("").trim().parse::<i64>();
+        let par = it.next().unwrap_or("").trim().parse::<i64>();
+        if let (Ok(c), Ok(p)) = (child, par) {
+            map.insert(c, p);
+        }
+    }
+    Ok(map)
+}
+
+/// Taxids present in the database library, from `seqid2taxid.map` when available.
+fn read_library_taxids(db_path: &Path) -> HashSet<i64> {
+    let mut set = HashSet::new();
+    let map_path = db_path.join("seqid2taxid.map");
+    if let Ok(file) = std::fs::File::open(&map_path) {
+        for line in BufReader::new(file).lines().map_while(|l| l.ok()) {
+            if let Some(t) = line.split_whitespace().nth(1) {
+                if let Ok(v) = t.trim().parse::<i64>() {
+                    set.insert(v);
+                }
+            }
+        }
+    }
+    set
+}
+
+fn parse_kraken_output(path: &Path, host_taxids: &HashSet<i64>) -> Result<Kraken2ReadClassification> {
     let file = std::fs::File::open(path)
         .map_err(|e| RustycleanError::ToolExecution(format!("failed to open kraken2 output: {}", e)))?;
     let reader = BufReader::new(file);
@@ -1040,7 +1179,7 @@ fn parse_kraken_output(path: &Path) -> Result<Kraken2ReadClassification> {
         let taxid: i64 = fields[2].parse().unwrap_or(0);
         let normalized = normalize_read_id(read_id);
 
-        if status == "C" && taxid == 9606 {
+        if status == "C" && host_taxids.contains(&taxid) {
             result.human_ids.insert(normalized);
         } else if status == "U" {
             result.unclassified_ids.insert(normalized);
@@ -1724,4 +1863,75 @@ async fn validate_and_finalize(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod host_taxid_tests {
+    use super::*;
+    use std::io::Write as _;
+
+    /// Minimal NCBI-style taxonomy: root(1) > Eukaryota(2759) > Primates(9443)
+    /// > Hominidae(9604) > Homo(9605) > Homo sapiens(9606) > neanderthalensis(63221),
+    /// plus a bacterial branch Bacteria(2) > Escherichia coli(562).
+    fn write_taxonomy(dir: &Path) {
+        let tax = dir.join("taxonomy");
+        std::fs::create_dir_all(&tax).unwrap();
+        let mut f = std::fs::File::create(tax.join("nodes.dmp")).unwrap();
+        for (child, parent) in [
+            (1, 1), (2759, 1), (9443, 2759), (9604, 9443), (9605, 9604),
+            (9606, 9605), (63221, 9606), (2, 1), (562, 2),
+        ] {
+            writeln!(f, "{}\t|\t{}\t|\tno rank\t|", child, parent).unwrap();
+        }
+    }
+
+    fn write_library(dir: &Path, taxids: &[i64]) {
+        let mut f = std::fs::File::create(dir.join("seqid2taxid.map")).unwrap();
+        for (i, t) in taxids.iter().enumerate() {
+            writeln!(f, "seq{}\t{}", i, t).unwrap();
+        }
+    }
+
+    #[test]
+    fn host_only_database_treats_whole_lineage_as_host() {
+        let dir = std::env::temp_dir().join(format!("rc_tax_hostonly_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_taxonomy(&dir);
+        write_library(&dir, &[9606]);
+
+        let set = resolve_host_taxids(&dir, 9606);
+        // the host taxon, its descendant, and every ancestor are host
+        for t in [9606, 63221, 9605, 9604, 9443, 2759, 1] {
+            assert!(set.contains(&t), "expected {} to be treated as host", t);
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn mixed_database_stops_below_the_shared_ancestor() {
+        let dir = std::env::temp_dir().join(format!("rc_tax_mixed_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        write_taxonomy(&dir);
+        write_library(&dir, &[9606, 562]); // human + a bacterium
+
+        let set = resolve_host_taxids(&dir, 9606);
+        // host clade and unambiguous ancestors stay
+        for t in [9606, 63221, 9605, 9604, 9443, 2759] {
+            assert!(set.contains(&t), "expected {} to be treated as host", t);
+        }
+        // root also covers the bacterium, so it must not count as host
+        assert!(!set.contains(&1), "root must not be treated as host in a mixed database");
+        assert!(!set.contains(&562));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_taxonomy_falls_back_to_exact_match() {
+        let dir = std::env::temp_dir().join(format!("rc_tax_none_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let set = resolve_host_taxids(&dir, 9606);
+        assert_eq!(set.len(), 1);
+        assert!(set.contains(&9606));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
