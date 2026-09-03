@@ -104,9 +104,8 @@ async fn main() -> Result<()> {
             if !db_path.exists() {
                 bail!("--sylph-db path does not exist: {}", db_path.display());
             }
-            let bt2_test = bowtie2_index_prefix.with_extension("1.bt2");
-            if !bt2_test.exists() {
-                bail!("bowtie2 index not found at prefix for sylph backend: {}", bowtie2_index_prefix.display());
+            if bowtie2_index_suffix(&bowtie2_index_prefix).is_none() {
+                bail!("bowtie2 index not found at prefix for sylph backend: {} (looked for .bt2 and .bt2l)", bowtie2_index_prefix.display());
             }
 
             HostRemovalConfig::Sylph {
@@ -158,9 +157,8 @@ async fn main() -> Result<()> {
             // Validate required databases for auto mode. sylph-db is optional
             // because auto mode now defaults to kraken2 for high-host samples;
             // sylph is only required when explicitly selected as the backend.
-            let bt2_test = bowtie2_index_prefix.with_extension("1.bt2");
-            if !bt2_test.exists() {
-                bail!("bowtie2 index not found at prefix: {}", bowtie2_index_prefix.display());
+            if bowtie2_index_suffix(&bowtie2_index_prefix).is_none() {
+                bail!("bowtie2 index not found at prefix: {} (looked for .bt2 and .bt2l)", bowtie2_index_prefix.display());
             }
             if let Some(ref kdb) = kraken2_db_path {
                 if !kdb.exists() {
@@ -308,6 +306,27 @@ fn available_memory_kb() -> Option<u64> {
     None
 }
 
+/// Locate a Bowtie2 index, accounting for both index formats.
+///
+/// Bowtie2 writes `.bt2` for small references and `.bt2l` for large ones,
+/// either when `--large-index` is given or automatically past roughly 4 Gbp.
+/// A human index built with `--large-index` is therefore `.bt2l`, and checking
+/// only for `.bt2` reports a perfectly good index as missing.
+fn bowtie2_index_suffix(prefix: &std::path::Path) -> Option<&'static str> {
+    ["bt2", "bt2l"]
+        .into_iter()
+        .find(|suffix| prefix.with_extension(format!("1.{suffix}")).exists())
+}
+
+/// The six files making up a Bowtie2 index, in whichever format is present.
+fn bowtie2_index_files(prefix: &std::path::Path) -> Vec<PathBuf> {
+    let suffix = bowtie2_index_suffix(prefix).unwrap_or("bt2");
+    ["1", "2", "3", "4", "rev.1", "rev.2"]
+        .iter()
+        .map(|part| prefix.with_extension(format!("{part}.{suffix}")))
+        .collect()
+}
+
 /// Estimate the resident database size in kB for the chosen backend.
 fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
     let paths: Vec<PathBuf> = match host_removal {
@@ -317,25 +336,11 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
         HostRemovalConfig::Auto { sylph_db_path, bowtie2_index_prefix, .. } => {
             // Auto mode's memory peak is dominated by the sylph+bowtie2 branch.
             let mut paths = vec![sylph_db_path.clone()];
-            paths.extend([
-                bowtie2_index_prefix.with_extension("1.bt2"),
-                bowtie2_index_prefix.with_extension("2.bt2"),
-                bowtie2_index_prefix.with_extension("3.bt2"),
-                bowtie2_index_prefix.with_extension("4.bt2"),
-                bowtie2_index_prefix.with_extension("rev.1.bt2"),
-                bowtie2_index_prefix.with_extension("rev.2.bt2"),
-            ]);
+            paths.extend(bowtie2_index_files(bowtie2_index_prefix));
             paths
         }
         HostRemovalConfig::Bowtie2 { index_prefix, .. } => {
-            vec![
-                index_prefix.with_extension("1.bt2"),
-                index_prefix.with_extension("2.bt2"),
-                index_prefix.with_extension("3.bt2"),
-                index_prefix.with_extension("4.bt2"),
-                index_prefix.with_extension("rev.1.bt2"),
-                index_prefix.with_extension("rev.2.bt2"),
-            ]
+            bowtie2_index_files(index_prefix)
         }
         HostRemovalConfig::Minimap2 { index_path, .. } => vec![index_path.clone()],
         HostRemovalConfig::Centrifuge { db_path, .. } => {
@@ -349,14 +354,7 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
             // Worst-case memory for the sylph+bowtie2 pipeline: both databases
             // may need to be resident when sylph signals host presence.
             let mut paths = vec![db_path.clone()];
-            paths.extend([
-                bowtie2_index_prefix.with_extension("1.bt2"),
-                bowtie2_index_prefix.with_extension("2.bt2"),
-                bowtie2_index_prefix.with_extension("3.bt2"),
-                bowtie2_index_prefix.with_extension("4.bt2"),
-                bowtie2_index_prefix.with_extension("rev.1.bt2"),
-                bowtie2_index_prefix.with_extension("rev.2.bt2"),
-            ]);
+            paths.extend(bowtie2_index_files(bowtie2_index_prefix));
             paths
         }
     };
@@ -502,4 +500,39 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod bowtie2_index_tests {
+    use super::*;
+    use std::fs;
+
+    /// A human index built with --large-index is written as .bt2l. Checking only
+    /// for .bt2 reported it missing and stopped every benchmark that used it.
+    #[test]
+    fn finds_both_index_formats() {
+        let base = std::env::temp_dir().join(format!("rc_bt2_{}", std::process::id()));
+        let small = base.join("small");
+        let large = base.join("large");
+        fs::create_dir_all(&small).unwrap();
+        fs::create_dir_all(&large).unwrap();
+
+        for part in ["1", "2", "3", "4", "rev.1", "rev.2"] {
+            fs::write(small.join(format!("idx.{part}.bt2")), b"").unwrap();
+            fs::write(large.join(format!("idx.{part}.bt2l")), b"").unwrap();
+        }
+
+        assert_eq!(bowtie2_index_suffix(&small.join("idx")), Some("bt2"));
+        assert_eq!(bowtie2_index_suffix(&large.join("idx")), Some("bt2l"));
+        assert_eq!(bowtie2_index_suffix(&base.join("absent")), None);
+
+        // The file list must follow the format that is actually present.
+        for dir in [&small, &large] {
+            let files = bowtie2_index_files(&dir.join("idx"));
+            assert_eq!(files.len(), 6);
+            assert!(files.iter().all(|f| f.exists()), "missing: {files:?}");
+        }
+
+        fs::remove_dir_all(&base).ok();
+    }
 }
