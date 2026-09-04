@@ -24,7 +24,7 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 | `sylph` | Fast k-mer sketch prefilter (`sylph query`) followed by Bowtie2 read-level removal for host-positive samples | Very fast screening of large cohorts; only runs full alignment when host signal is detected |
 | `minimap2` | Long- or short-read alignment (`-x sr`) | Long reads or when a minimap2 index is preferred |
 | `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
-| `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2`. Routes to `kraken2` only when the host fraction is above `--auto-high-threshold` **and** the library exceeds `--auto-reads-threshold`, since loading the Kraken2 database is a fixed cost that needs a large enough library to pay off. Add `--bowtie2-recheck` to verify the reads Kraken2 retained. | General use; balances speed and accuracy without manual tuning |
+| `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2`. Routes to `kraken2` only when the host fraction is above `--auto-high-threshold` **and** the library exceeds `--auto-reads-threshold`, since loading the Kraken2 database is a fixed cost that needs a large enough library to pay off. Add `--bowtie2-recheck` to re-check the reads Kraken2 called host and keep the ones Bowtie2 cannot place there. | General use; balances speed and accuracy without manual tuning |
 
 ## Databases
 
@@ -40,7 +40,7 @@ RustyClean is not restricted to a single host reference. You can point any backe
 | `minimap2` | Minimap2 index file (`.mmi`) | `--host-index /path/to/index.mmi` |
 | `centrifuge` | Centrifuge index prefix (files `{prefix}.1.cf`, `{prefix}.2.cf`, ...) | `--host-index /path/to/centrifuge_index_prefix` |
 | `auto` | Both a Kraken2 database and a Bowtie2 index prefix are required | `--kraken2-db ...` and `--host-index ...` |
-| verification pass | Bowtie2 index prefix used to re-screen the reads Kraken2 retained. Optional, and independent of `--host-index`. | `--bowtie2-recheck /path/to/bowtie2_index_prefix` |
+| verification pass | Bowtie2 index prefix used to re-check Kraken2's host calls; a call Bowtie2 cannot confirm is kept. Optional, and independent of `--host-index`. | `--bowtie2-recheck /path/to/bowtie2_index_prefix` |
 
 For `kraken2` and `centrifuge`, the database only needs to contain the host lineage (e.g. *Homo sapiens*, taxid 9606). For `bowtie2` and `minimap2`, build the index directly from the host reference FASTA. This makes RustyClean applicable across diverse host species and metagenome types (saliva, vaginal, gut, plant root, etc.).
 
@@ -225,7 +225,7 @@ Options:
       --sylph-min-cov <FLOAT>          Minimum effective coverage for sylph host-positive call [default: 0.0005]
       --host-index <PATH>              Host index path (minimap2 .mmi, bowtie2 prefix,
                                        centrifuge prefix, sylph .syldb, or auto survey index)
-      --bowtie2-recheck <PREFIX>       Re-align the reads Kraken2 retained against this Bowtie2
+      --bowtie2-recheck <PREFIX>       Re-align the reads Kraken2 called host against this Bowtie2
                                        index and drop any that map. Supplying the index enables
                                        the pass; omit the flag to disable it. May differ from
                                        --host-index

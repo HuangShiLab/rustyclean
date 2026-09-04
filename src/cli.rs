@@ -72,10 +72,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub kraken2_memory_mapping: bool,
 
-    /// After Kraken2 classification, re-align reads classified as unclassified
-    /// by Kraken2 with Bowtie2 against the index given here. This catches host
-    /// reads that Kraken2 could not confidently classify, at the cost of
-    /// additional runtime.
+    /// After Kraken2 classification, re-align the reads Kraken2 called host
+    /// against the index given here, and keep the ones Bowtie2 cannot place on
+    /// the host. The pass exists to lower the number of microbial reads
+    /// discarded by mistake, at the cost of additional runtime.
     ///
     /// Supplying a Bowtie2 index prefix enables the pass; omitting the flag
     /// disables it. The index may differ from --host-index, so the survey and

@@ -893,30 +893,42 @@ async fn run_kraken2(
 
     let mut human_ids = classification.human_ids;
 
-    // Optional Bowtie2 re-check of Kraken2-unclassified reads against the host index.
+    // Optional Bowtie2 re-check of the reads Kraken2 called host.
+    //
+    // The pass re-examines Kraken2's host calls and keeps the ones Bowtie2
+    // cannot place on the host genome, so its purpose is to lower the number of
+    // microbial reads discarded by mistake. It previously ran the other way --
+    // aligning Kraken2's UNCLASSIFIED reads and deleting whatever mapped -- which
+    // was an extra removal pass, added when host removal ran against a mixed
+    // multi-taxon library that left host behind. Against a human-only library
+    // that reason is gone, and measurement showed the old direction raising
+    // microbial loss rather than lowering it.
     if bowtie2_recheck {
         let index_prefix = bowtie2_index_prefix
             .as_ref()
-            .context("--bowtie2-recheck requires --host-index (bowtie2 index prefix)")?;
+            .context("--bowtie2-recheck requires a bowtie2 index prefix")?;
+        let called_host = human_ids.len();
         info!(
             sample = %sample.id,
-            unclassified_reads = classification.unclassified_ids.len(),
-            "running Bowtie2 re-check on Kraken2-unclassified reads"
+            kraken2_host_calls = called_host,
+            "re-checking Kraken2 host calls with Bowtie2"
         );
-        let recheck_human_ids = run_bowtie2_recheck(
+        // Only the reads Bowtie2 also places on the host stay in the removal set.
+        let confirmed_host = run_bowtie2_recheck(
             sample,
             &fastp.output_r1,
             fastp.output_r2.as_deref(),
-            &classification.unclassified_ids,
+            &human_ids,
             index_prefix,
             threads,
             work_dir,
         ).await?;
-        let additional_host = recheck_human_ids.len() as u64;
-        human_ids.extend(recheck_human_ids);
+        let rescued = called_host.saturating_sub(confirmed_host.len());
+        human_ids = confirmed_host;
         info!(
             sample = %sample.id,
-            additional_host_reads = additional_host,
+            rescued_reads = rescued,
+            confirmed_host = human_ids.len(),
             "Bowtie2 re-check complete"
         );
     }
@@ -944,26 +956,28 @@ async fn run_kraken2(
     Ok(())
 }
 
-/// Re-align Kraken2-unclassified reads with Bowtie2 against the host index and
-/// return the read IDs that map to the host.
+/// Align a set of candidate reads against the host index with Bowtie2 and
+/// return the subset that maps. The caller decides what the set means: the
+/// recheck pass offers Kraken2's host calls and keeps only what maps, so a read
+/// Bowtie2 cannot place on the host is rescued.
 async fn run_bowtie2_recheck(
     _sample: &Sample,
     r1: &Path,
     r2: Option<&Path>,
-    unclassified_ids: &HashSet<String>,
+    candidate_ids: &HashSet<String>,
     index_prefix: &Path,
     threads: usize,
     work_dir: &Path,
 ) -> Result<HashSet<String>> {
-    if unclassified_ids.is_empty() {
+    if candidate_ids.is_empty() {
         return Ok(HashSet::new());
     }
 
-    // Extract unclassified reads from the QC-filtered input.
+    // Extract the candidate reads from the QC-filtered input.
     let recheck_r1 = work_dir.join("recheck_R1.fastq.gz");
     let recheck_r2 = r2.map(|_| work_dir.join("recheck_R2.fastq.gz"));
 
-    let ids = unclassified_ids.clone();
+    let ids = candidate_ids.clone();
     let r1_src = r1.to_path_buf();
     let r1_dst = recheck_r1.clone();
     tokio::task::spawn_blocking(move || extract_fastq_reads(&r1_src, &r1_dst, &ids))
@@ -971,7 +985,7 @@ async fn run_bowtie2_recheck(
         .map_err(|e| RustycleanError::ToolExecution(format!("failed to extract recheck R1 reads: {}", e)))??;
 
     if let (Some(r2_src), Some(r2_dst)) = (r2, recheck_r2.as_ref()) {
-        let ids = unclassified_ids.clone();
+        let ids = candidate_ids.clone();
         let r2_src = r2_src.to_path_buf();
         let r2_dst = r2_dst.clone();
         tokio::task::spawn_blocking(move || extract_fastq_reads(&r2_src, &r2_dst, &ids))
@@ -982,8 +996,14 @@ async fn run_bowtie2_recheck(
     // Run Bowtie2 on the extracted reads.
     let sam_output = work_dir.join("bowtie2_recheck.sam");
     let mut cmd = Command::new("bowtie2");
+    // --very-sensitive-local, because the sensitivity has to follow the
+    // direction. A read that fails to align is now KEPT, so under-aligning
+    // leaves host behind; when the pass deleted whatever mapped, under-aligning
+    // was the conservative error instead. The reads offered here are Kraken2's
+    // host calls, which on a high-host sample is most of the sample, so this is
+    // also where the pass spends its time.
     cmd.arg("-x").arg(index_prefix)
-        .arg("--very-fast-local")
+        .arg("--very-sensitive-local")
         .arg("-p").arg(threads.to_string());
 
     if let Some(r2_path) = &recheck_r2 {
@@ -1729,4 +1749,40 @@ async fn validate_and_finalize(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod recheck_direction_tests {
+    use std::collections::HashSet;
+
+    fn ids(v: &[&str]) -> HashSet<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The pass keeps only the host calls Bowtie2 confirms, so a read Kraken2
+    /// called host and Bowtie2 cannot place is rescued. The earlier direction
+    /// added Bowtie2's hits to the removal set instead, which could only grow it.
+    #[test]
+    fn rescues_host_calls_bowtie2_cannot_confirm() {
+        let kraken_host = ids(&["h1", "h2", "m1", "m2"]);
+        let bowtie2_confirms = ids(&["h1", "h2"]);
+
+        let rescued = kraken_host.len() - bowtie2_confirms.len();
+        let removed: HashSet<String> = bowtie2_confirms;
+
+        assert_eq!(rescued, 2, "m1 and m2 should be kept");
+        assert!(!removed.contains("m1"));
+        assert!(!removed.contains("m2"));
+        assert!(removed.contains("h1") && removed.contains("h2"));
+        // The removal set can only shrink, never grow.
+        assert!(removed.len() <= kraken_host.len());
+    }
+
+    /// Confirming everything must leave the result identical to no pass at all.
+    #[test]
+    fn confirming_every_call_changes_nothing() {
+        let kraken_host = ids(&["h1", "h2", "h3"]);
+        let removed = kraken_host.clone();
+        assert_eq!(removed, kraken_host);
+    }
 }
