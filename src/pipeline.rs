@@ -11,6 +11,7 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tracing::info;
 
@@ -993,8 +994,11 @@ async fn run_bowtie2_recheck(
             .map_err(|e| RustycleanError::ToolExecution(format!("failed to extract recheck R2 reads: {}", e)))??;
     }
 
-    // Run Bowtie2 on the extracted reads.
-    let sam_output = work_dir.join("bowtie2_recheck.sam");
+    // Stream Bowtie2's output instead of writing a SAM. Only the mapped read
+    // IDs are wanted, and the candidate set is now Kraken2's host calls -- most
+    // of a high-host sample -- so a SAM on disk reaches tens of GB. On the 60M
+    // 90%-host dataset that landed on node-local storage beside a 16 GB staged
+    // database and ran it out of space.
     let mut cmd = Command::new("bowtie2");
     // --very-sensitive-local, because the sensitivity has to follow the
     // direction. A read that fails to align is now KEPT, so under-aligning
@@ -1013,25 +1017,52 @@ async fn run_bowtie2_recheck(
         cmd.arg("-U").arg(&recheck_r1);
     }
 
-    cmd.arg("-S").arg(&sam_output);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
-    let output = cmd
-        .output()
-        .await
+    let mut child = cmd
+        .spawn()
         .map_err(|e| RustycleanError::ToolExecution(format!("failed to run bowtie2 recheck: {}", e)))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(RustycleanError::ToolExecution(format!("bowtie2 recheck failed: {}", stderr)).into());
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RustycleanError::ToolExecution("bowtie2 recheck produced no output".into()))?;
+
+    let mut mapped_ids = HashSet::new();
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    while let Some(line) = lines
+        .next_line()
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to read bowtie2 output: {}", e)))?
+    {
+        if line.is_empty() || line.starts_with('@') {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let read_id = match fields.next() {
+            Some(v) => v,
+            None => continue,
+        };
+        let flag: u16 = match fields.next().and_then(|f| f.parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        // 0x4 = READ_UNMAPPED
+        if flag & 0x4 == 0 {
+            mapped_ids.insert(normalize_read_id(read_id));
+        }
     }
 
-    // Parse SAM to obtain mapped IDs.
-    let (mapped_ids, _, _) = tokio::task::spawn_blocking({
-        let sam_output = sam_output.clone();
-        move || parse_sam_mapped_ids(&sam_output)
-    })
-    .await
-    .map_err(|e| RustycleanError::ToolExecution(format!("failed to parse bowtie2 recheck SAM: {}", e)))??;
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to wait for bowtie2 recheck: {}", e)))?;
+    if !status.success() {
+        return Err(RustycleanError::ToolExecution(
+            format!("bowtie2 recheck failed with status {}", status)
+        ).into());
+    }
 
     Ok(mapped_ids)
 }
