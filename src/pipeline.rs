@@ -212,6 +212,7 @@ async fn run_host_removal(
         HostRemovalConfig::Sylph { .. } => run_sylph(sample, checkpoint, config, work_dir).await,
         HostRemovalConfig::Centrifuge { .. } => run_centrifuge(sample, checkpoint, config, work_dir).await,
         HostRemovalConfig::Fmh { .. } => run_fmh(sample, checkpoint, config, work_dir).await,
+        HostRemovalConfig::Deacon { .. } => run_deacon(sample, checkpoint, config, work_dir).await,
         HostRemovalConfig::Auto { .. } => {
             let resolved = resolve_auto_config(sample, checkpoint, config, work_dir).await?;
             checkpoint.auto_backend = Some(resolved.mode().to_string());
@@ -1560,6 +1561,107 @@ fn read_fmh_record(reader: &mut Box<dyn BufRead>) -> Result<Option<FmhRecord>> {
         seq1: seq.trim_end().as_bytes().to_vec(),
         seq2: None,
     }))
+}
+
+// ----------------------------------------------------------------------------
+// deacon
+// ----------------------------------------------------------------------------
+
+/// Run the Deacon minimizer-based host-removal backend.
+///
+/// `deacon filter -d` depletes (discards) reads whose minimizer-hit count
+/// meets the absolute/relative thresholds, i.e. host reads; all other reads
+/// are kept. Unlike the ID-based backends, deacon emits the clean FASTQs
+/// itself, so the outputs are written directly to the final paths in
+/// `sample.output_dir` (same approach as `run_bowtie2_pipeline`) and the
+/// checkpoint metrics are filled from input/output read counts.
+async fn run_deacon(
+    sample: &Sample,
+    checkpoint: &mut Checkpoint,
+    config: &Config,
+    work_dir: &Path,
+) -> Result<()> {
+    let (index_path, threads, abs_threshold, rel_threshold) = match &config.tools.host_removal {
+        HostRemovalConfig::Deacon { index_path, threads, abs_threshold, rel_threshold } => {
+            (index_path.clone(), *threads, *abs_threshold, *rel_threshold)
+        }
+        _ => bail!("internal error: run_deacon called with non-deacon config"),
+    };
+
+    let fastp = checkpoint
+        .fastp_metrics
+        .as_ref()
+        .context("fastp metrics missing before deacon stage")?;
+
+    fs::create_dir_all(&sample.output_dir).await?;
+    let final_r1 = sample.output_dir.join(format!("{}_clean_R1.fastq.gz", sample.id));
+    let final_r2 = if sample.is_paired() {
+        Some(sample.output_dir.join(format!("{}_clean_R2.fastq.gz", sample.id)))
+    } else {
+        None
+    };
+
+    let summary_path = work_dir.join("deacon_summary.json");
+
+    // deacon filter -d <index> <input.r1> [<input.r2>] -o <out.r1> [-O <out.r2>]
+    let mut cmd = Command::new("deacon");
+    cmd.arg("filter")
+        .arg("-d")
+        .arg("-a").arg(abs_threshold.to_string())
+        .arg("-r").arg(rel_threshold.to_string())
+        .arg("-t").arg(threads.to_string())
+        .arg("-s").arg(&summary_path)
+        .arg(&index_path)
+        .arg(&fastp.output_r1)
+        .arg("-o").arg(&final_r1);
+
+    if let (Some(r2), Some(out2)) = (&fastp.output_r2, &final_r2) {
+        cmd.arg(r2).arg("-O").arg(out2);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to run deacon: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(RustycleanError::ToolExecution(format!("deacon failed: {}", stderr)).into());
+    }
+
+    info!(
+        sample = %sample.id,
+        abs_threshold = abs_threshold,
+        rel_threshold = rel_threshold,
+        "deacon filter complete"
+    );
+
+    // Depleted (host) reads = input reads - kept reads.  For paired-end the
+    // R1 record count equals the number of surviving pairs.
+    let final_r1_count = final_r1.clone();
+    let kept = tokio::task::spawn_blocking(move || count_fastq_records(&final_r1_count))
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to count deacon output reads: {}", e)))??;
+
+    let input_reads = fastp.output_reads;
+    let classified_reads = input_reads.saturating_sub(kept);
+    let total = input_reads;
+    let contamination = if total > 0 {
+        (classified_reads as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    checkpoint.kraken2_metrics = Some(Kraken2Metrics {
+        classified_reads,
+        unclassified_reads: kept,
+        human_reads: classified_reads,
+        contamination_percent: contamination,
+        output_r1: final_r1,
+        output_r2: final_r2,
+    });
+
+    Ok(())
 }
 
 // ----------------------------------------------------------------------------

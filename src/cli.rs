@@ -4,7 +4,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "rustyclean")]
-#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/sylph+bowtie2/centrifuge/fmh/auto")]
+#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/sylph+bowtie2/centrifuge/fmh/deacon/auto")]
 #[command(version, arg_required_else_help = true)]
 pub struct Cli {
     /// Forward reads (R1) fastq(.gz) file
@@ -99,6 +99,21 @@ pub struct Cli {
     #[arg(long, default_value_t = 1)]
     pub fmh_min_hits: u32,
 
+    /// Deacon minimizer index built by `deacon index build`.
+    /// Required with `--host-removal-mode deacon`.
+    #[arg(long)]
+    pub deacon_index: Option<PathBuf>,
+
+    /// Absolute minimizer-hit threshold for a read to be depleted as host
+    /// (deacon mode; default: 2).
+    #[arg(long, default_value_t = 2)]
+    pub deacon_abs_threshold: u32,
+
+    /// Relative minimizer-hit threshold for a read to be depleted as host
+    /// (deacon mode; default: 0.01).
+    #[arg(long, default_value_t = 0.01)]
+    pub deacon_rel_threshold: f64,
+
     /// Sylph database path (.syldb) for the sylph backend and for the
     /// high-host branch of auto mode.
     #[arg(long)]
@@ -162,5 +177,6 @@ pub enum HostRemovalModeCli {
     Sylph,
     Centrifuge,
     Fmh,
+    Deacon,
     Auto,
 }

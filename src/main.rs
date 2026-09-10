@@ -143,6 +143,21 @@ async fn main() -> Result<()> {
                 threads: config.tools.host_removal.threads(),
             }
         }
+        HostRemovalModeCli::Deacon => {
+            let index_path = match &cli.deacon_index {
+                Some(p) => p.clone(),
+                None => bail!("--host-removal-mode deacon requires --deacon-index <path>"),
+            };
+            if !index_path.exists() {
+                bail!("--deacon-index path does not exist: {}", index_path.display());
+            }
+            HostRemovalConfig::Deacon {
+                index_path,
+                threads: config.tools.host_removal.threads(),
+                abs_threshold: cli.deacon_abs_threshold,
+                rel_threshold: cli.deacon_rel_threshold,
+            }
+        }
         HostRemovalModeCli::Auto => {
             let sylph_db_path = cli.sylph_db
                 .unwrap_or_else(|| {
@@ -356,6 +371,7 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
         }
         HostRemovalConfig::Minimap2 { index_path, .. } => vec![index_path.clone()],
         HostRemovalConfig::Fmh { sketch_path, .. } => vec![sketch_path.clone()],
+        HostRemovalConfig::Deacon { index_path, .. } => vec![index_path.clone()],
         HostRemovalConfig::Centrifuge { db_path, .. } => {
             vec![
                 db_path.with_extension("1.cf"),
@@ -428,6 +444,9 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
         }
         HostRemovalConfig::Fmh { sketch_path, min_hits, .. } => {
             HostRemovalConfig::Fmh { sketch_path, min_hits, threads }
+        }
+        HostRemovalConfig::Deacon { index_path, abs_threshold, rel_threshold, .. } => {
+            HostRemovalConfig::Deacon { index_path, threads, abs_threshold, rel_threshold }
         }
         HostRemovalConfig::Auto {
             sylph_db_path,
@@ -511,6 +530,7 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         HostRemovalConfig::Sylph { .. } => vec!["sylph", "bowtie2", "samtools"],
         HostRemovalConfig::Centrifuge { .. } => vec!["centrifuge"],
         HostRemovalConfig::Fmh { .. } => vec![], // pure-Rust backend, no external tools
+        HostRemovalConfig::Deacon { .. } => vec!["deacon"],
         HostRemovalConfig::Auto { .. } => unreachable!(),
     };
     for tool in backend_tools {

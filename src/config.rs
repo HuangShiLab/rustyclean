@@ -120,6 +120,20 @@ pub enum HostRemovalConfig {
         min_hits: u32,
         threads: usize,
     },
+    #[serde(rename = "deacon")]
+    Deacon {
+        /// Deacon minimizer index built by `deacon index build`.
+        index_path: PathBuf,
+        threads: usize,
+        /// Absolute minimizer-hit threshold for a read to be treated as host
+        /// (depleted by `deacon filter -d`).
+        #[serde(default = "default_deacon_abs_threshold")]
+        abs_threshold: u32,
+        /// Relative minimizer-hit threshold (fraction of read minimizers that
+        /// must hit the index) for a read to be treated as host.
+        #[serde(default = "default_deacon_rel_threshold")]
+        rel_threshold: f64,
+    },
     #[serde(rename = "auto")]
     Auto {
         /// Sylph sketch database used for the default high-host branch.
@@ -168,6 +182,7 @@ impl HostRemovalConfig {
             HostRemovalConfig::Sylph { .. } => "sylph",
             HostRemovalConfig::Centrifuge { .. } => "centrifuge",
             HostRemovalConfig::Fmh { .. } => "fmh",
+            HostRemovalConfig::Deacon { .. } => "deacon",
             HostRemovalConfig::Auto { .. } => "auto",
         }
     }
@@ -180,6 +195,7 @@ impl HostRemovalConfig {
             HostRemovalConfig::Sylph { .. } => "sylph",
             HostRemovalConfig::Centrifuge { .. } => "centrifuge",
             HostRemovalConfig::Fmh { .. } => "fmh",
+            HostRemovalConfig::Deacon { .. } => "deacon",
             HostRemovalConfig::Auto { .. } => "auto-unresolved",
         }
     }
@@ -192,9 +208,18 @@ impl HostRemovalConfig {
             HostRemovalConfig::Sylph { threads, .. } => *threads,
             HostRemovalConfig::Centrifuge { threads, .. } => *threads,
             HostRemovalConfig::Fmh { threads, .. } => *threads,
+            HostRemovalConfig::Deacon { threads, .. } => *threads,
             HostRemovalConfig::Auto { threads, .. } => *threads,
         }
     }
+}
+
+fn default_deacon_abs_threshold() -> u32 {
+    2
+}
+
+fn default_deacon_rel_threshold() -> f64 {
+    0.01
 }
 
 fn default_fmh_min_hits() -> u32 {
