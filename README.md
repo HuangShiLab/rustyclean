@@ -137,12 +137,12 @@ cargo build --release
 ## Quick Start
 
 ```bash
-# Single sample, paired-end, default kraken2 mode
+# Single sample, paired-end, kraken2 mode
 rustyclean --r1 sample_R1.fastq.gz --r2 sample_R2.fastq.gz \
            --kraken2-db /path/to/kraken2_db \
            -o output/
 
-# Single sample, single-end, default kraken2 mode
+# Single sample, single-end, kraken2 mode
 rustyclean --r1 sample.fastq.gz \
            --kraken2-db /path/to/kraken2_db \
            -o output/
@@ -203,7 +203,7 @@ Options:
   -s, --samples <SAMPLES>              Sample list file (TSV)
   -o, --output <OUTPUT>                Output directory [default: rustyclean_output]
       --host-removal-mode <MODE>       Host-removal backend: kraken2, minimap2, bowtie2,
-                                       centrifuge, auto [default: kraken2]
+                                       centrifuge, auto [default: auto]
       --host-pct <PCT>                 Expected host contamination % (0-100); used by auto mode
       --auto-survey                    Enable lightweight survey for auto mode
       --auto-survey-nreads <N>         Reads to survey [default: 100000]

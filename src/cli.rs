@@ -23,10 +23,11 @@ pub struct Cli {
     #[arg(short, long, default_value = "rustyclean_output")]
     pub output: PathBuf,
 
-    /// Host-removal backend. `auto` selects bowtie2 for low-host samples and
-    /// sylph+bowtie2 for high-host samples based on user-provided host
-    /// percentage or a light-weight survey.
-    #[arg(long, value_enum, visible_alias = "mode", default_value = "kraken2")]
+    /// Host-removal backend. `auto` (default) runs deacon as the Tier-1
+    /// backend when `--deacon-index` is given (bowtie2 recheck is triggered
+    /// for high-host samples from deacon's removed-proportion summary), and
+    /// falls back to bowtie2 / sylph+bowtie2 routing otherwise.
+    #[arg(long, value_enum, visible_alias = "mode", default_value = "auto")]
     pub host_removal_mode: HostRemovalModeCli,
 
     /// Expected host contamination percentage (0-100). When provided with
