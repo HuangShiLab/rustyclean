@@ -12,9 +12,11 @@ use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::process::Command;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::config::{Config, HostRemovalConfig};
+use crate::config::{
+    default_deacon_abs_threshold, default_deacon_rel_threshold, Config, HostRemovalConfig,
+};
 use crate::error::RustycleanError;
 use crate::sample::Sample;
 
@@ -212,6 +214,10 @@ async fn run_host_removal(
         HostRemovalConfig::Sylph { .. } => run_sylph(sample, checkpoint, config, work_dir).await,
         HostRemovalConfig::Centrifuge { .. } => run_centrifuge(sample, checkpoint, config, work_dir).await,
         HostRemovalConfig::Deacon { .. } => run_deacon(sample, checkpoint, config, work_dir).await,
+        HostRemovalConfig::Auto { deacon_index_path: Some(_), .. } => {
+            checkpoint.auto_backend = Some("deacon".to_string());
+            run_auto_deacon(sample, checkpoint, config, work_dir).await
+        }
         HostRemovalConfig::Auto { .. } => {
             let resolved = resolve_auto_config(sample, checkpoint, config, work_dir).await?;
             checkpoint.auto_backend = Some(resolved.mode().to_string());
@@ -287,6 +293,7 @@ async fn resolve_auto_config(
             sylph_min_eff_cov,
             memory_mapping,
             bowtie2_recheck,
+            ..
         } => (
             sylph_db_path.clone(),
             bowtie2_index_prefix.clone(),
@@ -1137,7 +1144,8 @@ async fn run_minimap2(
 /// The final FASTQ files are written directly to `sample.output_dir`.
 async fn run_bowtie2_pipeline(
     sample: &Sample,
-    fastp: &FastpMetrics,
+    input_r1: &Path,
+    input_r2: Option<&Path>,
     index_prefix: &Path,
     threads: usize,
     work_dir: &Path,
@@ -1154,13 +1162,13 @@ async fn run_bowtie2_pipeline(
     let count_after = work_dir.join("bowtie2_count_after.txt");
 
     let index = index_prefix.display().to_string();
-    let r1 = fastp.output_r1.display().to_string();
+    let r1 = input_r1.display().to_string();
     let t = threads.to_string();
     let c_before = count_before.display().to_string();
     let c_after = count_after.display().to_string();
 
     let pipeline = if sample.is_paired() {
-        let r2 = fastp.output_r2.as_ref().unwrap().display().to_string();
+        let r2 = input_r2.unwrap().display().to_string();
         let out1 = final_r1.display().to_string();
         let out2 = final_r2.as_ref().unwrap().display().to_string();
         format!(
@@ -1237,7 +1245,7 @@ async fn run_bowtie2(
         .as_ref()
         .context("fastp metrics missing before bowtie2 stage")?;
 
-    let metrics = run_bowtie2_pipeline(sample, fastp, &index_prefix, threads, work_dir).await?;
+    let metrics = run_bowtie2_pipeline(sample, &fastp.output_r1, fastp.output_r2.as_deref(), &index_prefix, threads, work_dir).await?;
     checkpoint.kraken2_metrics = Some(metrics);
 
     validate_and_finalize(sample, checkpoint, config).await?;
@@ -1446,6 +1454,190 @@ async fn run_deacon(
     Ok(())
 }
 
+/// Run deacon as the Tier-1 host-removal backend in auto mode, with an
+/// optional Bowtie2 recheck of deacon-retained reads for high-host samples.
+///
+/// Deacon's per-read cost is independent of the host fraction, so no backend
+/// routing (survey / kraken2 vs bowtie2 selection) is needed. Deacon writes
+/// its retained reads and summary JSON to the work directory. When the summary
+/// reports `seqs_removed_proportion` at or above `recheck_threshold`, the
+/// retained reads are re-aligned with Bowtie2 against the human index (same
+/// index and threads as the kraken2 recheck) and the rechecked output becomes
+/// the final clean FASTQ; otherwise deacon's output is final.
+async fn run_auto_deacon(
+    sample: &Sample,
+    checkpoint: &mut Checkpoint,
+    config: &Config,
+    work_dir: &Path,
+) -> Result<()> {
+    let (deacon_index_path, bowtie2_index_prefix, threads, recheck_threshold) =
+        match &config.tools.host_removal {
+            HostRemovalConfig::Auto {
+                deacon_index_path: Some(deacon_index_path),
+                bowtie2_index_prefix,
+                threads,
+                recheck_threshold,
+                ..
+            } => (
+                deacon_index_path.clone(),
+                bowtie2_index_prefix.clone(),
+                *threads,
+                *recheck_threshold,
+            ),
+            _ => bail!("internal error: run_auto_deacon called with non-auto config"),
+        };
+
+    let fastp = checkpoint
+        .fastp_metrics
+        .as_ref()
+        .context("fastp metrics missing before deacon stage")?;
+
+    // Deacon emits the retained reads itself; keep them in the work directory
+    // so the optional recheck can stream from them before the final output is
+    // written to `sample.output_dir`.
+    let deacon_r1 = work_dir.join("deacon_R1.fastq.gz");
+    let deacon_r2 = if sample.is_paired() {
+        Some(work_dir.join("deacon_R2.fastq.gz"))
+    } else {
+        None
+    };
+    let summary_path = work_dir.join("deacon_summary.json");
+
+    // deacon filter -d <index> <input.r1> [<input.r2>] -o <out.r1> [-O <out.r2>]
+    let mut cmd = Command::new("deacon");
+    cmd.arg("filter")
+        .arg("-d")
+        .arg("-a").arg(default_deacon_abs_threshold().to_string())
+        .arg("-r").arg(default_deacon_rel_threshold().to_string())
+        .arg("-t").arg(threads.to_string())
+        .arg("-s").arg(&summary_path)
+        .arg(&deacon_index_path)
+        .arg(&fastp.output_r1)
+        .arg("-o").arg(&deacon_r1);
+
+    if let (Some(r2), Some(out2)) = (&fastp.output_r2, &deacon_r2) {
+        cmd.arg(r2).arg("-O").arg(out2);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to run deacon: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(RustycleanError::ToolExecution(format!("deacon failed: {}", stderr)).into());
+    }
+
+    // Parse the removed proportion from deacon's summary JSON. If the summary
+    // is missing or unparseable, warn and skip the recheck rather than failing.
+    let removed_proportion = parse_deacon_removed_proportion(&summary_path);
+    let recheck = match removed_proportion {
+        Some(p) => {
+            let enabled = p >= recheck_threshold;
+            info!(
+                sample = %sample.id,
+                seqs_removed_proportion = format!("{:.4}", p),
+                recheck_threshold = recheck_threshold,
+                recheck_enabled = enabled,
+                "auto mode: deacon removed proportion parsed"
+            );
+            enabled
+        }
+        None => {
+            warn!(
+                sample = %sample.id,
+                summary = %summary_path.display(),
+                "auto mode: could not parse deacon summary; skipping bowtie2 recheck"
+            );
+            false
+        }
+    };
+
+    if recheck {
+        info!(
+            sample = %sample.id,
+            "auto mode: running Bowtie2 recheck on deacon-retained reads"
+        );
+        let metrics = run_bowtie2_pipeline(
+            sample,
+            &deacon_r1,
+            deacon_r2.as_deref(),
+            &bowtie2_index_prefix,
+            threads,
+            work_dir,
+        )
+        .await?;
+        info!(
+            sample = %sample.id,
+            additional_host_reads = metrics.classified_reads,
+            "auto mode: Bowtie2 recheck complete"
+        );
+        checkpoint.kraken2_metrics = Some(metrics);
+    } else {
+        // Below threshold (or no summary): deacon's output is final.
+        fs::create_dir_all(&sample.output_dir).await?;
+        let final_r1 = sample.output_dir.join(format!("{}_clean_R1.fastq.gz", sample.id));
+        let final_r2 = if sample.is_paired() {
+            Some(sample.output_dir.join(format!("{}_clean_R2.fastq.gz", sample.id)))
+        } else {
+            None
+        };
+        move_or_copy(&deacon_r1, &final_r1).await?;
+        if let (Some(dr2), Some(fr2)) = (&deacon_r2, &final_r2) {
+            move_or_copy(dr2, fr2).await?;
+        }
+
+        // Depleted (host) reads = input reads - kept reads. For paired-end the
+        // R1 record count equals the number of surviving pairs.
+        let final_r1_count = final_r1.clone();
+        let kept = tokio::task::spawn_blocking(move || count_fastq_records(&final_r1_count))
+            .await
+            .map_err(|e| RustycleanError::ToolExecution(format!("failed to count deacon output reads: {}", e)))??;
+
+        let input_reads = fastp.output_reads;
+        let classified_reads = input_reads.saturating_sub(kept);
+        let total = input_reads;
+        let contamination = if total > 0 {
+            (classified_reads as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        checkpoint.kraken2_metrics = Some(Kraken2Metrics {
+            classified_reads,
+            unclassified_reads: kept,
+            human_reads: classified_reads,
+            contamination_percent: contamination,
+            output_r1: final_r1,
+            output_r2: final_r2,
+        });
+    }
+
+    Ok(())
+}
+
+/// Parse `seqs_removed_proportion` (a float 0-1) from deacon's `-s` summary
+/// JSON. Returns None when the summary is missing or lacks the field.
+fn parse_deacon_removed_proportion(path: &Path) -> Option<f64> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    json.get("seqs_removed_proportion")?.as_f64()
+}
+
+/// Move a file, falling back to copy + remove when rename fails (e.g. when the
+/// work directory and the output directory live on different filesystems).
+async fn move_or_copy(src: &Path, dst: &Path) -> Result<()> {
+    if fs::rename(src, dst).await.is_ok() {
+        return Ok(());
+    }
+    fs::copy(src, dst)
+        .await
+        .map_err(|e| RustycleanError::ToolExecution(format!("failed to copy {} to {}: {}", src.display(), dst.display(), e)))?;
+    let _ = fs::remove_file(src).await;
+    Ok(())
+}
+
 // ----------------------------------------------------------------------------
 // sylph
 // ----------------------------------------------------------------------------
@@ -1512,7 +1704,7 @@ async fn run_sylph(
     );
 
     if host_positive {
-        let metrics = run_bowtie2_pipeline(sample, fastp, &bowtie2_index_prefix, threads, work_dir).await?;
+        let metrics = run_bowtie2_pipeline(sample, &fastp.output_r1, fastp.output_r2.as_deref(), &bowtie2_index_prefix, threads, work_dir).await?;
         checkpoint.kraken2_metrics = Some(metrics);
     } else {
         // No detectable host signal: keep all reads.

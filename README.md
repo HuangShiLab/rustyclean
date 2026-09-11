@@ -4,8 +4,8 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 
 ## Features
 
-- **Multiple host-removal backends** -- Kraken2, minimap2, Bowtie2, sylph, Centrifuge, or adaptive `auto` mode
-- **AUTO mode** -- surveys a small subset of reads and automatically selects Bowtie2 (low-host samples) or Kraken2 (large, high-host samples) for best performance
+- **Multiple host-removal backends** -- Kraken2, minimap2, Bowtie2, sylph, Centrifuge, deacon, or adaptive `auto` mode
+- **AUTO mode** -- with `--deacon-index`, every sample runs the deacon minimizer backend as Tier-1 (per-read cost independent of host fraction) with an automatic Bowtie2 recheck for high-host samples; without a deacon index it surveys a small subset of reads and selects Bowtie2 (low-host) or sylph+bowtie2 (high-host samples)
 - **`--skip-qc` mode** -- bypass fastp and feed raw reads directly to the host-removal backend, useful for already-QC'd data or fair benchmarking of host removal only
 - **Dual input mode** -- direct FASTQ(.gz) file input or batch processing via sample list
 - **Single-end & paired-end** -- automatically adapts the pipeline based on input
@@ -24,14 +24,16 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 | `sylph` | Fast k-mer sketch prefilter (`sylph query`) followed by Bowtie2 read-level removal for host-positive samples | Very fast screening of large cohorts; only runs full alignment when host signal is detected |
 | `minimap2` | Long- or short-read alignment (`-x sr`) | Long reads or when a minimap2 index is preferred |
 | `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
-| `deacon` | Minimizer-based depletion with the external `deacon filter -d` tool against an index built by `deacon index build`; reads meeting the `--deacon-abs-threshold` / `--deacon-rel-threshold` minimizer-hit thresholds are discarded | Very fast, memory-light host removal when a deacon index is available |
-| `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2` | General use; balances speed and accuracy without manual tuning |
+| `deacon` | Minimizer-based depletion with the external `deacon filter -d` tool against an index built by `deacon index build`; reads meeting the `--deacon-abs-threshold` / `--deacon-rel-threshold` minimizer-hit thresholds are discarded | Very fast, memory-light host removal when a deacon index is available; default Tier-1 backend in `auto` mode when `--deacon-index` is given |
+| `auto` | With `--deacon-index`: deacon as Tier-1 for every sample, plus a Bowtie2 recheck of deacon-retained reads when the removed proportion reaches `--recheck-threshold` (default 0.3). Without `--deacon-index`: surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `sylph` | General use; deacon Tier-1 when an index is available, otherwise legacy routing |
 
 ## Databases
 
 RustyClean is not restricted to a single host reference. You can point any backend to a custom database or index built from the host genome of interest. Common use cases include human (e.g. GRCh38, T2T-CHM13), mouse, rat, pig, rice, monkey, and other plant or animal host genomes.
 
-**Default human database.** For human metagenomes, the recommended default is a **T2T-only Kraken2 database** built from the T2T-CHM13v2.0 assembly. This database is smaller and faster than mixed multi-host libraries while retaining high accuracy for human host removal. A mixed multi-host Kraken2 database ("Kraken16", containing human plus other common hosts) is available as an optional taxonomy-aware mode when you expect cross-species contamination or want taxonomic context.
+**Default human database.** For human metagenomes, the recommended default is a **T2T-only Kraken2 database** built from the T2T-CHM13v2.0 assembly. This database is smaller and faster than mixed multi-host libraries while retaining high accuracy for human host removal. A mixed multi-host Kraken2 database ("Kraken16", containing human plus other common hosts) is available as an optional taxonomy-aware mode when you expect cross-species contamination or want taxonomic context. GRCh38.p14-based Kraken2 databases are also supported.
+
+**Deacon human index (panhuman-1).** For deacon-based removal (explicit `--host-removal-mode deacon`, or `auto` mode with `--deacon-index`), the recommended human index is the prebuilt **panhuman-1** (k31w15 minimizers): a union of human pangenome references minus FDA-ARGOS bacteria and RefSeq viral sequences, so microbial reads are not depleted along with host reads. The index is user-provided via `--deacon-index`; for non-human hosts, build a custom index with `deacon index build`. Alongside it, the Kraken2 databases described above (T2T-only, GRCh38, or mixed multi-host) remain supported for the kraken2 backend and the legacy auto-routing fallback.
 
 | Backend | Database / index type | How to specify |
 |---------|----------------------|----------------|
@@ -40,7 +42,8 @@ RustyClean is not restricted to a single host reference. You can point any backe
 | `sylph` | sylph sketch database (`.syldb`) plus a Bowtie2 index prefix for full removal | `--sylph-db /path/to/human.syldb` and `--host-index /path/to/bowtie2_index_prefix` |
 | `minimap2` | Minimap2 index file (`.mmi`) | `--host-index /path/to/index.mmi` |
 | `centrifuge` | Centrifuge index prefix (files `{prefix}.1.cf`, `{prefix}.2.cf`, ...) | `--host-index /path/to/centrifuge_index_prefix` |
-| `auto` | Both a Kraken2 database and a Bowtie2 index prefix are required | `--kraken2-db ...` and `--host-index ...` |
+| `deacon` | Deacon minimizer index built by `deacon index build` (e.g. the prebuilt human panhuman-1 index, k31w15) | `--deacon-index /path/to/deacon_index` |
+| `auto` | Deacon index for Tier-1 (with a Bowtie2 index prefix for the recheck), or a sylph database + Bowtie2 index prefix for legacy routing | `--deacon-index ...` and `--host-index ...`, or `--sylph-db ...` and `--host-index ...` |
 
 For `kraken2` and `centrifuge`, the database only needs to contain the host lineage (e.g. *Homo sapiens*, taxid 9606). For `bowtie2` and `minimap2`, build the index directly from the host reference FASTA. This makes RustyClean applicable across diverse host species and metagenome types (saliva, vaginal, gut, plant root, etc.).
 
@@ -119,6 +122,7 @@ Install the following tools and ensure they are available in `$PATH`. Only the t
 - [minimap2](https://github.com/lh3/minimap2) -- for `--host-removal-mode minimap2`
 - [Centrifuge](https://ccb.jhu.edu/software/centrifuge/) -- for `--host-removal-mode centrifuge`
 - [sylph](https://github.com/bluenote-1577/sylph) (>= 0.9) -- for `--host-removal-mode sylph`
+- [deacon](https://github.com/dnbaker/deacon) (>= 0.17; `cargo install deacon`) -- for `--host-removal-mode deacon`, or as the default Tier-1 backend in `auto` mode when `--deacon-index` is given. The prebuilt **panhuman-1** index (k31w15) is the recommended human index; see [Databases](#databases)
 
 ## Installation
 
@@ -214,6 +218,10 @@ Options:
       --sylph-min-cov <FLOAT>          Minimum effective coverage for sylph host-positive call [default: 0.0005]
       --host-index <PATH>              Host index path (minimap2 .mmi, bowtie2 prefix,
                                        centrifuge prefix, sylph .syldb, or auto survey index)
+      --deacon-index <PATH>            Deacon minimizer index; required for `--host-removal-mode
+                                       deacon`, and enables deacon as Tier-1 backend in auto mode
+      --recheck-threshold <FLOAT>      Removed-proportion (0-1) triggering the auto-mode
+                                       bowtie2 recheck of deacon-retained reads [default: 0.3]
       --max-contamination <PCT>        Max allowed host contamination in output [default: 100.0]
       --skip-qc                        Skip fastp QC and use raw reads for host removal
   -c, --config <CONFIG>                Configuration file (TOML)

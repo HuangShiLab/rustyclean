@@ -90,9 +90,17 @@ pub struct Cli {
     pub host_index: Option<PathBuf>,
 
     /// Deacon minimizer index built by `deacon index build`.
-    /// Required with `--host-removal-mode deacon`.
+    /// Required with `--host-removal-mode deacon`. In `auto` mode, providing
+    /// an existing index makes deacon the Tier-1 host-removal backend for
+    /// every sample (with a bowtie2 recheck above `--recheck-threshold`).
     #[arg(long)]
     pub deacon_index: Option<PathBuf>,
+
+    /// Removed-read proportion (0-1) reported by deacon's summary JSON at or
+    /// above which auto mode re-aligns deacon-retained reads with Bowtie2
+    /// against the host index (default: 0.3).
+    #[arg(long, default_value_t = 0.3)]
+    pub recheck_threshold: f64,
 
     /// Absolute minimizer-hit threshold for a read to be depleted as host
     /// (deacon mode; default: 2).

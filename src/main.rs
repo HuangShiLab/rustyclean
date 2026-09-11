@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::checkpoint::CheckpointManager;
@@ -169,18 +169,44 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Validate required databases for auto mode.
-            if !sylph_db_path.exists() {
+            // Deacon Tier-1 gate: when a usable deacon index is provided, auto
+            // mode runs deacon for every sample (per-read cost is independent
+            // of host fraction, so backend routing is unnecessary). When the
+            // index is missing, keep the legacy routing behavior unchanged.
+            let deacon_index_path = match &cli.deacon_index {
+                Some(p) if p.exists() => Some(p.clone()),
+                Some(p) => {
+                    warn!(
+                        "--deacon-index not found ({}); auto mode falls back to legacy routing",
+                        p.display()
+                    );
+                    None
+                }
+                None => None,
+            };
+
+            // Validate required databases for auto mode. The sylph database
+            // and the kraken2 fallback are only needed by the legacy routing
+            // path; the bowtie2 index is always required (recheck / removal).
+            if deacon_index_path.is_none() && !sylph_db_path.exists() {
                 bail!("--sylph-db path does not exist: {}", sylph_db_path.display());
             }
             let bt2_test = bowtie2_index_prefix.with_extension("1.bt2");
             if !bt2_test.exists() {
                 bail!("bowtie2 index not found at prefix: {}", bowtie2_index_prefix.display());
             }
-            if let Some(ref kdb) = kraken2_db_path {
-                if !kdb.exists() {
-                    bail!("--kraken2-db path does not exist: {}", kdb.display());
+            if deacon_index_path.is_none() {
+                if let Some(ref kdb) = kraken2_db_path {
+                    if !kdb.exists() {
+                        bail!("--kraken2-db path does not exist: {}", kdb.display());
+                    }
                 }
+            }
+            if deacon_index_path.is_some() {
+                info!(
+                    "Auto mode: deacon is Tier-1 host-removal backend (recheck when removed proportion >= {:.2})",
+                    cli.recheck_threshold
+                );
             }
 
             HostRemovalConfig::Auto {
@@ -199,6 +225,8 @@ async fn main() -> Result<()> {
                 sylph_min_eff_cov: cli.sylph_min_cov,
                 memory_mapping: cli.kraken2_memory_mapping,
                 bowtie2_recheck: cli.bowtie2_recheck,
+                deacon_index_path,
+                recheck_threshold: cli.recheck_threshold,
             }
         }
     };
@@ -328,9 +356,14 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
         HostRemovalConfig::Kraken2 { db_path, .. } => {
             vec![db_path.join("hash.k2d")]
         }
-        HostRemovalConfig::Auto { sylph_db_path, bowtie2_index_prefix, .. } => {
-            // Auto mode's memory peak is dominated by the sylph+bowtie2 branch.
-            let mut paths = vec![sylph_db_path.clone()];
+        HostRemovalConfig::Auto { sylph_db_path, bowtie2_index_prefix, deacon_index_path, .. } => {
+            // In deacon Tier-1 mode the sylph database is never loaded; the
+            // memory peak is the deacon index plus the bowtie2 recheck index.
+            let mut paths = Vec::new();
+            match deacon_index_path {
+                Some(idx) => paths.push(idx.clone()),
+                None => paths.push(sylph_db_path.clone()),
+            }
             paths.extend([
                 bowtie2_index_prefix.with_extension("1.bt2"),
                 bowtie2_index_prefix.with_extension("2.bt2"),
@@ -441,6 +474,8 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
             sylph_min_eff_cov,
             memory_mapping,
             bowtie2_recheck,
+            deacon_index_path,
+            recheck_threshold,
             ..
         } => {
             HostRemovalConfig::Auto {
@@ -459,6 +494,8 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
                 sylph_min_eff_cov,
                 memory_mapping,
                 bowtie2_recheck,
+                deacon_index_path,
+                recheck_threshold,
             }
         }
     }
@@ -476,9 +513,22 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         }
     }
 
-    // For auto mode, sylph and bowtie2 are required; kraken2 is only needed
-    // when an explicit fallback is configured.
+    // For auto mode, the required tools depend on the Tier-1 backend: deacon
+    // (with bowtie2+samtools for the recheck) when a deacon index is provided,
+    // otherwise sylph with bowtie2+samtools. kraken2 is only needed when an
+    // explicit fallback is configured on the legacy routing path.
     if matches!(host_removal, HostRemovalConfig::Auto { .. }) {
+        if let HostRemovalConfig::Auto { deacon_index_path: Some(_), .. } = host_removal {
+            for tool in &["deacon", "bowtie2", "samtools"] {
+                which::which(tool).map_err(|_| {
+                    anyhow::anyhow!(
+                        "'{}' not found in PATH. Auto mode with --deacon-index requires deacon, bowtie2 and samtools.",
+                        tool
+                    )
+                })?;
+            }
+            return Ok(());
+        }
         for tool in &["sylph", "bowtie2", "samtools"] {
             which::which(tool).map_err(|_| {
                 anyhow::anyhow!(

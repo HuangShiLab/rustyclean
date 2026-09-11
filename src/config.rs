@@ -160,6 +160,15 @@ pub enum HostRemovalConfig {
         /// when the auto backend resolves to kraken2.
         #[serde(default)]
         bowtie2_recheck: bool,
+        /// Deacon minimizer index. When set (and the file exists), auto mode
+        /// runs deacon as the Tier-1 backend for every sample instead of
+        /// routing between kraken2/bowtie2/sylph.
+        #[serde(default)]
+        deacon_index_path: Option<PathBuf>,
+        /// Removed-read proportion (0-1) from deacon's summary JSON at or above
+        /// which the deacon-retained reads are re-aligned with Bowtie2.
+        #[serde(default = "default_recheck_threshold")]
+        recheck_threshold: f64,
     },
 }
 
@@ -201,12 +210,16 @@ impl HostRemovalConfig {
     }
 }
 
-fn default_deacon_abs_threshold() -> u32 {
+pub(crate) fn default_deacon_abs_threshold() -> u32 {
     2
 }
 
-fn default_deacon_rel_threshold() -> f64 {
+pub(crate) fn default_deacon_rel_threshold() -> f64 {
     0.01
+}
+
+pub(crate) fn default_recheck_threshold() -> f64 {
+    0.3
 }
 
 fn default_memory_mapping() -> bool {
