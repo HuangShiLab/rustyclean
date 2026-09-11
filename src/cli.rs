@@ -4,7 +4,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "rustyclean")]
-#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/sylph+bowtie2/centrifuge/fmh/deacon/auto")]
+#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/sylph+bowtie2/centrifuge/deacon/auto")]
 #[command(version, arg_required_else_help = true)]
 pub struct Cli {
     /// Forward reads (R1) fastq(.gz) file
@@ -89,16 +89,6 @@ pub struct Cli {
     #[arg(long)]
     pub host_index: Option<PathBuf>,
 
-    /// FracMinHash sketch (.fmh) built by the `build-fmh-sketch` binary.
-    /// Required with `--host-removal-mode fmh`.
-    #[arg(long)]
-    pub fmh_sketch: Option<PathBuf>,
-
-    /// Minimum number of FMH sketch k-mer hits for a read to be called host
-    /// (fmh mode; default: 1).
-    #[arg(long, default_value_t = 1)]
-    pub fmh_min_hits: u32,
-
     /// Deacon minimizer index built by `deacon index build`.
     /// Required with `--host-removal-mode deacon`.
     #[arg(long)]
@@ -176,7 +166,6 @@ pub enum HostRemovalModeCli {
     Bowtie2,
     Sylph,
     Centrifuge,
-    Fmh,
     Deacon,
     Auto,
 }

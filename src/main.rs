@@ -2,7 +2,6 @@ mod checkpoint;
 mod cli;
 mod config;
 mod error;
-mod fmh;
 mod pipeline;
 mod sample;
 mod worker;
@@ -123,23 +122,6 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|| std::path::PathBuf::from("/db/human_t2t_hla_cf"));
             HostRemovalConfig::Centrifuge {
                 db_path,
-                threads: config.tools.host_removal.threads(),
-            }
-        }
-        HostRemovalModeCli::Fmh => {
-            let sketch_path = match &cli.fmh_sketch {
-                Some(p) => p.clone(),
-                None => bail!("--host-removal-mode fmh requires --fmh-sketch <path>"),
-            };
-            if !sketch_path.exists() {
-                bail!("--fmh-sketch path does not exist: {}", sketch_path.display());
-            }
-            if cli.fmh_min_hits == 0 {
-                bail!("--fmh-min-hits must be >= 1");
-            }
-            HostRemovalConfig::Fmh {
-                sketch_path,
-                min_hits: cli.fmh_min_hits,
                 threads: config.tools.host_removal.threads(),
             }
         }
@@ -370,7 +352,6 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
             ]
         }
         HostRemovalConfig::Minimap2 { index_path, .. } => vec![index_path.clone()],
-        HostRemovalConfig::Fmh { sketch_path, .. } => vec![sketch_path.clone()],
         HostRemovalConfig::Deacon { index_path, .. } => vec![index_path.clone()],
         HostRemovalConfig::Centrifuge { db_path, .. } => {
             vec![
@@ -441,9 +422,6 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
         }
         HostRemovalConfig::Centrifuge { db_path, .. } => {
             HostRemovalConfig::Centrifuge { db_path, threads }
-        }
-        HostRemovalConfig::Fmh { sketch_path, min_hits, .. } => {
-            HostRemovalConfig::Fmh { sketch_path, min_hits, threads }
         }
         HostRemovalConfig::Deacon { index_path, abs_threshold, rel_threshold, .. } => {
             HostRemovalConfig::Deacon { index_path, threads, abs_threshold, rel_threshold }
@@ -529,7 +507,6 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         HostRemovalConfig::Bowtie2 { .. } => vec!["bowtie2", "samtools"],
         HostRemovalConfig::Sylph { .. } => vec!["sylph", "bowtie2", "samtools"],
         HostRemovalConfig::Centrifuge { .. } => vec!["centrifuge"],
-        HostRemovalConfig::Fmh { .. } => vec![], // pure-Rust backend, no external tools
         HostRemovalConfig::Deacon { .. } => vec!["deacon"],
         HostRemovalConfig::Auto { .. } => unreachable!(),
     };

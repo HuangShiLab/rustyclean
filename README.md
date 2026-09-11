@@ -24,7 +24,6 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 | `sylph` | Fast k-mer sketch prefilter (`sylph query`) followed by Bowtie2 read-level removal for host-positive samples | Very fast screening of large cohorts; only runs full alignment when host signal is detected |
 | `minimap2` | Long- or short-read alignment (`-x sr`) | Long reads or when a minimap2 index is preferred |
 | `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
-| `fmh` | FracMinHash k-mer sketch built from the host genome (via `build-fmh-sketch`); reads with >= `--fmh-min-hits` sketch hits are removed | Dependency-light, pure-Rust host removal with a tiny memory footprint |
 | `deacon` | Minimizer-based depletion with the external `deacon filter -d` tool against an index built by `deacon index build`; reads meeting the `--deacon-abs-threshold` / `--deacon-rel-threshold` minimizer-hit thresholds are discarded | Very fast, memory-light host removal when a deacon index is available |
 | `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2` | General use; balances speed and accuracy without manual tuning |
 

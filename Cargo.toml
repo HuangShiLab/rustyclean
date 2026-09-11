@@ -23,7 +23,3 @@ num_cpus = "1"
 dashmap = "6"
 flate2 = "1"
 rand = "0.8"
-
-[[bin]]
-name = "build-fmh-sketch"
-path = "src/bin/build-fmh-sketch.rs"
