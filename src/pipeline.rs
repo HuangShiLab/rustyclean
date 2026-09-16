@@ -501,6 +501,7 @@ async fn run_bowtie2_survey(
     let output = Command::new("bowtie2")
         .arg("-x").arg(index_prefix)
         .arg("--very-fast-local")
+        .arg("--mm")
         .arg("-p").arg(threads.to_string())
         .arg("-U").arg(reads)
         .arg("-S").arg(&sam_output)
@@ -978,6 +979,7 @@ async fn run_bowtie2_recheck(
     let mut cmd = Command::new("bowtie2");
     cmd.arg("-x").arg(index_prefix)
         .arg("--very-fast-local")
+        .arg("--mm")
         .arg("-p").arg(threads.to_string());
 
     if let Some(r2_path) = &recheck_r2 {

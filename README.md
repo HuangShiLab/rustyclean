@@ -245,6 +245,10 @@ concurrent workers do not collectively exceed ~80% of available RAM. This
 prevents out-of-memory failures when many samples are processed in parallel on
 shared-memory nodes. You can override the cap by explicitly setting `-w`.
 
+All Bowtie2 invocations---including AUTO survey, depletion and recheck---pass
+`--mm`, so processes using the same read-only index can share its file-backed
+pages instead of loading private copies.
+
 ## Pipeline
 
 ### Default (QC + host removal)
