@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::checkpoint::CheckpointManager;
@@ -125,21 +125,6 @@ async fn main() -> Result<()> {
                 threads: config.tools.host_removal.threads(),
             }
         }
-        HostRemovalModeCli::Deacon => {
-            let index_path = match &cli.deacon_index {
-                Some(p) => p.clone(),
-                None => bail!("--host-removal-mode deacon requires --deacon-index <path>"),
-            };
-            if !index_path.exists() {
-                bail!("--deacon-index path does not exist: {}", index_path.display());
-            }
-            HostRemovalConfig::Deacon {
-                index_path,
-                threads: config.tools.host_removal.threads(),
-                abs_threshold: cli.deacon_abs_threshold,
-                rel_threshold: cli.deacon_rel_threshold,
-            }
-        }
         HostRemovalModeCli::Auto => {
             let sylph_db_path = cli.sylph_db
                 .unwrap_or_else(|| {
@@ -169,42 +154,15 @@ async fn main() -> Result<()> {
                 }
             });
 
-            // Deacon Tier-1 gate: when a deacon index is provided, auto mode runs
-            // deacon for every sample (per-read cost is independent of host
-            // fraction, so backend routing is unnecessary). Without one, auto
-            // mode keeps the survey-based bowtie2 / kraken2 routing.
-            let deacon_index_path = match &cli.deacon_index {
-                Some(p) if p.exists() => Some(p.clone()),
-                // A mistyped index path must not silently switch the workflow
-                // to a different backend.
-                Some(p) => bail!("--deacon-index path does not exist: {}", p.display()),
-                None => None,
-            };
-
-            // Validate required databases for auto mode. The bowtie2 index is
-            // always required (deacon recheck, survey and low-host removal);
+            // Validate required databases for auto mode. sylph-db is optional
+            // because auto mode now defaults to kraken2 for high-host samples;
             // sylph is only required when explicitly selected as the backend.
             if bowtie2_index_suffix(&bowtie2_index_prefix).is_none() {
                 bail!("bowtie2 index not found at prefix: {} (looked for .bt2 and .bt2l)", bowtie2_index_prefix.display());
             }
-            if deacon_index_path.is_none() {
-                if let Some(ref kdb) = kraken2_db_path {
-                    if !kdb.exists() {
-                        bail!("--kraken2-db path does not exist: {}", kdb.display());
-                    }
-                }
-            }
-            // A removed proportion never exceeds 1, so any threshold above 1
-            // turns the verification pass off.
-            let recheck_threshold = if cli.no_recheck { f64::MAX } else { cli.recheck_threshold };
-            if deacon_index_path.is_some() {
-                if recheck_threshold > 1.0 {
-                    info!("Auto mode: deacon is Tier-1 host-removal backend (Bowtie2 recheck disabled)");
-                } else {
-                    info!(
-                        "Auto mode: deacon is Tier-1 host-removal backend (recheck when removed proportion >= {:.2})",
-                        recheck_threshold
-                    );
+            if let Some(ref kdb) = kraken2_db_path {
+                if !kdb.exists() {
+                    bail!("--kraken2-db path does not exist: {}", kdb.display());
                 }
             }
 
@@ -225,8 +183,6 @@ async fn main() -> Result<()> {
                 memory_mapping: cli.kraken2_memory_mapping,
                 bowtie2_recheck: recheck_enabled,
                 bowtie2_recheck_index: cli.bowtie2_recheck.clone(),
-                deacon_index_path,
-                recheck_threshold,
             }
         }
     };
@@ -377,14 +333,9 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
         HostRemovalConfig::Kraken2 { db_path, .. } => {
             vec![db_path.join("hash.k2d")]
         }
-        HostRemovalConfig::Auto { sylph_db_path, bowtie2_index_prefix, deacon_index_path, .. } => {
-            // In deacon Tier-1 mode the sylph database is never loaded; the
-            // memory peak is the deacon index plus the bowtie2 recheck index.
-            let mut paths = Vec::new();
-            match deacon_index_path {
-                Some(idx) => paths.push(idx.clone()),
-                None => paths.push(sylph_db_path.clone()),
-            }
+        HostRemovalConfig::Auto { sylph_db_path, bowtie2_index_prefix, .. } => {
+            // Auto mode's memory peak is dominated by the sylph+bowtie2 branch.
+            let mut paths = vec![sylph_db_path.clone()];
             paths.extend(bowtie2_index_files(bowtie2_index_prefix));
             paths
         }
@@ -392,7 +343,6 @@ fn estimate_db_size_kb(host_removal: &HostRemovalConfig) -> Option<u64> {
             bowtie2_index_files(index_prefix)
         }
         HostRemovalConfig::Minimap2 { index_path, .. } => vec![index_path.clone()],
-        HostRemovalConfig::Deacon { index_path, .. } => vec![index_path.clone()],
         HostRemovalConfig::Centrifuge { db_path, .. } => {
             vec![
                 db_path.with_extension("1.cf"),
@@ -456,9 +406,6 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
         HostRemovalConfig::Centrifuge { db_path, .. } => {
             HostRemovalConfig::Centrifuge { db_path, threads }
         }
-        HostRemovalConfig::Deacon { index_path, abs_threshold, rel_threshold, .. } => {
-            HostRemovalConfig::Deacon { index_path, threads, abs_threshold, rel_threshold }
-        }
         HostRemovalConfig::Auto {
             sylph_db_path,
             bowtie2_index_prefix,
@@ -475,8 +422,6 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
             memory_mapping,
             bowtie2_recheck,
             bowtie2_recheck_index,
-            deacon_index_path,
-            recheck_threshold,
             ..
         } => {
             HostRemovalConfig::Auto {
@@ -496,8 +441,6 @@ fn set_host_removal_threads(cfg: HostRemovalConfig, threads: usize) -> HostRemov
                 memory_mapping,
                 bowtie2_recheck,
                 bowtie2_recheck_index,
-                deacon_index_path,
-                recheck_threshold,
             }
         }
     }
@@ -515,22 +458,9 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         }
     }
 
-    // For auto mode, the required tools depend on the Tier-1 backend: deacon
-    // (with bowtie2+samtools for the recheck) when a deacon index is provided,
-    // otherwise bowtie2+samtools, plus kraken2 when a kraken2 database is
-    // provided for the high-host branch.
+    // For auto mode, bowtie2 and samtools are always required; kraken2 is
+    // required when a kraken2 database is provided (default high-host branch).
     if matches!(host_removal, HostRemovalConfig::Auto { .. }) {
-        if let HostRemovalConfig::Auto { deacon_index_path: Some(_), .. } = host_removal {
-            for tool in &["deacon", "bowtie2", "samtools"] {
-                which::which(tool).map_err(|_| {
-                    anyhow::anyhow!(
-                        "'{}' not found in PATH. Auto mode with --deacon-index requires deacon, bowtie2 and samtools.",
-                        tool
-                    )
-                })?;
-            }
-            return Ok(());
-        }
         for tool in &["bowtie2", "samtools"] {
             which::which(tool).map_err(|_| {
                 anyhow::anyhow!(
@@ -559,7 +489,6 @@ fn check_tools(host_removal: &HostRemovalConfig, skip_qc: bool) -> Result<()> {
         HostRemovalConfig::Bowtie2 { .. } => vec!["bowtie2", "samtools"],
         HostRemovalConfig::Sylph { .. } => vec!["sylph", "bowtie2", "samtools"],
         HostRemovalConfig::Centrifuge { .. } => vec!["centrifuge"],
-        HostRemovalConfig::Deacon { .. } => vec!["deacon"],
         HostRemovalConfig::Auto { .. } => unreachable!(),
     };
     for tool in backend_tools {

@@ -4,7 +4,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(name = "rustyclean")]
-#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + deacon/kraken2/minimap2/bowtie2/sylph+bowtie2/centrifuge/auto")]
+#[command(about = "High-performance metagenome QC and host removal pipeline using fastp + kraken2/minimap2/bowtie2/kraken2+bowtie2-recheck/centrifuge/auto")]
 #[command(version, arg_required_else_help = true)]
 pub struct Cli {
     /// Forward reads (R1) fastq(.gz) file
@@ -23,11 +23,10 @@ pub struct Cli {
     #[arg(short, long, default_value = "rustyclean_output")]
     pub output: PathBuf,
 
-    /// Host-removal backend. `auto` (default) runs deacon as the Tier-1
-    /// backend when `--deacon-index` is given (bowtie2 recheck is triggered
-    /// for high-host samples from deacon's removed-proportion summary), and
-    /// falls back to survey-based bowtie2 / kraken2 routing otherwise.
-    #[arg(long, value_enum, visible_alias = "mode", default_value = "auto")]
+    /// Host-removal backend. `auto` selects bowtie2 for low-host samples and
+    /// kraken2 with bowtie2 recheck for high-host samples based on user-provided host
+    /// percentage or a light-weight survey.
+    #[arg(long, value_enum, visible_alias = "mode", default_value = "kraken2")]
     pub host_removal_mode: HostRemovalModeCli,
 
     /// Expected host contamination percentage (0-100). When provided with
@@ -78,10 +77,6 @@ pub struct Cli {
     /// the host. The pass exists to lower the number of microbial reads
     /// discarded by mistake, at the cost of additional runtime.
     ///
-    /// Applies to the Kraken2 backend only (including the Kraken2 branch of
-    /// survey-based auto routing). It is unrelated to the verification pass of
-    /// deacon AUTO mode, which is controlled by `--recheck-threshold`.
-    ///
     /// Supplying a Bowtie2 index prefix enables the pass; omitting the flag
     /// disables it. The index may differ from --host-index, so the survey and
     /// the verification pass can use different references.
@@ -96,35 +91,6 @@ pub struct Cli {
     /// - auto: bowtie2 index prefix used for the survey and low-host branch
     #[arg(long)]
     pub host_index: Option<PathBuf>,
-
-    /// Deacon minimizer index built by `deacon index build`.
-    /// Required with `--host-removal-mode deacon`. In `auto` mode, providing
-    /// an existing index makes deacon the Tier-1 host-removal backend for
-    /// every sample (with a bowtie2 recheck above `--recheck-threshold`).
-    #[arg(long)]
-    pub deacon_index: Option<PathBuf>,
-
-    /// Removed-read proportion (0-1) reported by deacon's summary JSON at or
-    /// above which auto mode re-aligns deacon-retained reads with Bowtie2
-    /// against `--host-index` and removes the reads that map (default: 0.3).
-    #[arg(long, default_value_t = 0.3)]
-    pub recheck_threshold: f64,
-
-    /// Disable the Bowtie2 verification pass of deacon AUTO mode, so the
-    /// workflow is fastp -> deacon for every sample. Equivalent to a
-    /// `--recheck-threshold` above 1.
-    #[arg(long, conflicts_with = "recheck_threshold")]
-    pub no_recheck: bool,
-
-    /// Absolute minimizer-hit threshold for a read to be depleted as host
-    /// (deacon mode; default: 2).
-    #[arg(long, default_value_t = 2)]
-    pub deacon_abs_threshold: u32,
-
-    /// Relative minimizer-hit threshold for a read to be depleted as host
-    /// (deacon mode; default: 0.01).
-    #[arg(long, default_value_t = 0.01)]
-    pub deacon_rel_threshold: f64,
 
     /// Sylph database path (.syldb) for the sylph backend and for the
     /// high-host branch of auto mode.
@@ -188,7 +154,6 @@ pub enum HostRemovalModeCli {
     Bowtie2,
     Sylph,
     Centrifuge,
-    Deacon,
     Auto,
 }
 
@@ -220,26 +185,6 @@ mod recheck_flag_tests {
     fn the_flag_requires_a_value() {
         assert!(Cli::try_parse_from(
             ["rustyclean", "--r1", "x.fq.gz", "--kraken2-db", "/db", "--bowtie2-recheck"]
-        ).is_err());
-    }
-
-    #[test]
-    fn auto_is_the_default_mode() {
-        assert!(matches!(cli(&[]).host_removal_mode, HostRemovalModeCli::Auto));
-    }
-
-    #[test]
-    fn deacon_recheck_threshold_defaults_to_0_3() {
-        let c = cli(&[]);
-        assert_eq!(c.recheck_threshold, 0.3);
-        assert!(!c.no_recheck);
-    }
-
-    #[test]
-    fn no_recheck_conflicts_with_an_explicit_threshold() {
-        assert!(cli(&["--no-recheck"]).no_recheck);
-        assert!(Cli::try_parse_from(
-            ["rustyclean", "--r1", "x.fq.gz", "--no-recheck", "--recheck-threshold", "0.5"]
         ).is_err());
     }
 

@@ -4,8 +4,8 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 
 ## Features
 
-- **Multiple host-removal backends** -- Kraken2, minimap2, Bowtie2, sylph, Centrifuge, deacon, or adaptive `auto` mode
-- **AUTO mode** -- with `--deacon-index`, every sample runs the deacon minimizer backend as Tier-1 (per-read cost independent of host fraction) with an automatic Bowtie2 recheck for high-host samples; without a deacon index it surveys a small subset of reads and selects Bowtie2 (low-host) or Kraken2 (large, high-host samples)
+- **Multiple host-removal backends** -- Kraken2, minimap2, Bowtie2, sylph, Centrifuge, or adaptive `auto` mode
+- **AUTO mode** -- surveys a small subset of reads and automatically selects Bowtie2 (low-host samples) or Kraken2 (large, high-host samples) for best performance
 - **`--skip-qc` mode** -- bypass fastp and feed raw reads directly to the host-removal backend, useful for already-QC'd data or fair benchmarking of host removal only
 - **Dual input mode** -- direct FASTQ(.gz) file input or batch processing via sample list
 - **Single-end & paired-end** -- automatically adapts the pipeline based on input
@@ -24,16 +24,13 @@ A high-performance metagenome QC and host removal pipeline written in Rust. Rust
 | `sylph` | Fast k-mer sketch prefilter (`sylph query`) followed by Bowtie2 read-level removal for host-positive samples | Very fast screening of large cohorts; only runs full alignment when host signal is detected |
 | `minimap2` | Long- or short-read alignment (`-x sr`) | Long reads or when a minimap2 index is preferred |
 | `centrifuge` | Compressed FM-index taxonomic classification | Alternative k-mer classifier; removes human taxid 9606 reads |
-| `deacon` | Minimizer-based depletion with the external `deacon filter -d` tool against an index built by `deacon index build`; reads meeting the `--deacon-abs-threshold` / `--deacon-rel-threshold` minimizer-hit thresholds are discarded | Very fast, memory-light host removal when a deacon index is available |
-| `auto` (default) | **With `--deacon-index` (recommended):** fastp, then deacon for every sample, then a Bowtie2 recheck of the deacon-retained reads when deacon's removed proportion reaches `--recheck-threshold` (default 0.3); reads Bowtie2 places on the host are removed. `--no-recheck` turns the recheck off. **Without `--deacon-index`:** surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2` (`kraken2` only when the host fraction is above `--auto-high-threshold` **and** the library exceeds `--auto-reads-threshold`). | General use; the deacon workflow is the one evaluated in the RustyClean manuscript |
+| `auto` | Surveys reads with Bowtie2, estimates host %, then picks `bowtie2` or `kraken2`. Routes to `kraken2` only when the host fraction is above `--auto-high-threshold` **and** the library exceeds `--auto-reads-threshold`, since loading the Kraken2 database is a fixed cost that needs a large enough library to pay off. Add `--bowtie2-recheck` to re-check the reads Kraken2 called host and keep the ones Bowtie2 cannot place there. | General use; balances speed and accuracy without manual tuning |
 
 ## Databases
 
 RustyClean is not restricted to a single host reference. You can point any backend to a custom database or index built from the host genome of interest. Common use cases include human (e.g. GRCh38, T2T-CHM13), mouse, rat, pig, rice, monkey, and other plant or animal host genomes.
 
-**Kraken2 human database.** For the Kraken2 backend on human metagenomes, the recommended database is a **T2T-only Kraken2 database** built from the T2T-CHM13v2.0 assembly. This database is smaller and faster than mixed multi-host libraries while retaining high accuracy for human host removal. A mixed multi-host Kraken2 database ("Kraken16", containing human plus other common hosts) is available as an optional taxonomy-aware mode when you expect cross-species contamination or want taxonomic context. GRCh38.p14-based Kraken2 databases are also supported.
-
-**Deacon human index (panhuman-1).** For deacon-based removal (explicit `--host-removal-mode deacon`, or `auto` mode with `--deacon-index`), the recommended human index is the prebuilt **panhuman-1** (k31w15 minimizers): a union of human pangenome references minus FDA-ARGOS bacteria and RefSeq viral sequences, so microbial reads are not depleted along with host reads. The index is user-provided via `--deacon-index`; for non-human hosts, build a custom index with `deacon index build`. Alongside it, the Kraken2 databases described above (T2T-only, GRCh38, or mixed multi-host) remain supported for the kraken2 backend and the legacy auto-routing fallback.
+**Default human database.** For human metagenomes, the recommended default is a **T2T-only Kraken2 database** built from the T2T-CHM13v2.0 assembly. This database is smaller and faster than mixed multi-host libraries while retaining high accuracy for human host removal. A mixed multi-host Kraken2 database ("Kraken16", containing human plus other common hosts) is available as an optional taxonomy-aware mode when you expect cross-species contamination or want taxonomic context.
 
 | Backend | Database / index type | How to specify |
 |---------|----------------------|----------------|
@@ -42,9 +39,8 @@ RustyClean is not restricted to a single host reference. You can point any backe
 | `sylph` | sylph sketch database (`.syldb`) plus a Bowtie2 index prefix for full removal | `--sylph-db /path/to/human.syldb` and `--host-index /path/to/bowtie2_index_prefix` |
 | `minimap2` | Minimap2 index file (`.mmi`) | `--host-index /path/to/index.mmi` |
 | `centrifuge` | Centrifuge index prefix (files `{prefix}.1.cf`, `{prefix}.2.cf`, ...) | `--host-index /path/to/centrifuge_index_prefix` |
-| `deacon` | Deacon minimizer index built by `deacon index build` (e.g. the prebuilt human panhuman-1 index, k31w15) | `--deacon-index /path/to/deacon_index` |
-| `auto` | Deacon index for Tier-1 plus a Bowtie2 index prefix for the recheck (recommended), or a Bowtie2 index prefix plus an optional Kraken2 database for survey-based routing | `--deacon-index ...` and `--host-index ...`, or `--host-index ...` and `--kraken2-db ...` |
-| Kraken2 verification pass | Bowtie2 index prefix used to re-check Kraken2's host calls; a call Bowtie2 cannot confirm is kept. Kraken2 backend only, and independent of `--host-index`. | `--bowtie2-recheck /path/to/bowtie2_index_prefix` |
+| `auto` | Both a Kraken2 database and a Bowtie2 index prefix are required | `--kraken2-db ...` and `--host-index ...` |
+| verification pass | Bowtie2 index prefix used to re-check Kraken2's host calls; a call Bowtie2 cannot confirm is kept. Optional, and independent of `--host-index`. | `--bowtie2-recheck /path/to/bowtie2_index_prefix` |
 
 For `kraken2` and `centrifuge`, the database only needs to contain the host lineage (e.g. *Homo sapiens*, taxid 9606). For `bowtie2` and `minimap2`, build the index directly from the host reference FASTA. This makes RustyClean applicable across diverse host species and metagenome types (saliva, vaginal, gut, plant root, etc.).
 
@@ -118,12 +114,11 @@ rustyclean --r1 sample.fastq.gz --kraken2-db "${DB_DIR}/kraken2/t2t_only" -o out
 Install the following tools and ensure they are available in `$PATH`. Only the tools required by your chosen backend need to be installed.
 
 - [fastp](https://github.com/OpenGene/fastp) (>= 0.23) -- required unless `--skip-qc` is used
-- [Kraken2](https://github.com/DerrickWood/kraken2) (>= 2.1) with a pre-built database -- for `--host-removal-mode kraken2`, or `auto` without `--deacon-index` when `--kraken2-db` is given
+- [Kraken2](https://github.com/DerrickWood/kraken2) (>= 2.1) with a pre-built database -- for `--host-removal-mode kraken2` or `auto`
 - [Bowtie2](https://github.com/BenLangmead/bowtie2) (>= 2.4) and [samtools](http://www.htslib.org/) -- for `--host-removal-mode bowtie2`, `--host-removal-mode sylph`, or `auto`
 - [minimap2](https://github.com/lh3/minimap2) -- for `--host-removal-mode minimap2`
 - [Centrifuge](https://ccb.jhu.edu/software/centrifuge/) -- for `--host-removal-mode centrifuge`
 - [sylph](https://github.com/bluenote-1577/sylph) (>= 0.9) -- for `--host-removal-mode sylph`
-- [deacon](https://github.com/bede/deacon) (>= 0.17; `cargo install deacon`) -- for `--host-removal-mode deacon`, or as the default Tier-1 backend in `auto` mode when `--deacon-index` is given. The prebuilt **panhuman-1** index (k31w15) is the recommended human index; see [Databases](#databases)
 
 ## Installation
 
@@ -138,33 +133,17 @@ cargo build --release
 ## Quick Start
 
 ```bash
-# Recommended: AUTO mode with deacon (fastp -> deacon -> conditional Bowtie2
-# recheck). The recheck runs only when deacon removes >= 30% of reads.
+# Single sample, paired-end, default kraken2 mode
 rustyclean --r1 sample_R1.fastq.gz --r2 sample_R2.fastq.gz \
-           --deacon-index /path/to/panhuman-1.k31w15.idx \
-           --host-index /path/to/bowtie2_index_prefix \
-           -o output/ -t 8
-
-# Same, without the Bowtie2 recheck (fastp -> deacon only)
-rustyclean --r1 sample.fastq.gz \
-           --deacon-index /path/to/panhuman-1.k31w15.idx \
-           --host-index /path/to/bowtie2_index_prefix \
-           --no-recheck \
-           -o output/ -t 8
-
-# deacon alone, no recheck and no Bowtie2 index needed
-rustyclean --r1 sample.fastq.gz \
-           --host-removal-mode deacon \
-           --deacon-index /path/to/panhuman-1.k31w15.idx \
-           -o output/ -t 8
-
-# Single sample, paired-end, kraken2 mode
-rustyclean --r1 sample_R1.fastq.gz --r2 sample_R2.fastq.gz \
-           --host-removal-mode kraken2 \
            --kraken2-db /path/to/kraken2_db \
            -o output/
 
-# AUTO mode without deacon: choose bowtie2/kraken2 from a 100k-read survey
+# Single sample, single-end, default kraken2 mode
+rustyclean --r1 sample.fastq.gz \
+           --kraken2-db /path/to/kraken2_db \
+           -o output/
+
+# AUTO mode: adaptively choose bowtie2/kraken2 based on a 100k-read survey
 rustyclean --r1 sample.fastq.gz \
            --host-removal-mode auto \
            --kraken2-db /path/to/kraken2_db \
@@ -172,10 +151,9 @@ rustyclean --r1 sample.fastq.gz \
            --auto-survey \
            -o output/ -t 8
 
-# AUTO mode without deacon, with the Kraken2 verification pass: the reads
-# Kraken2 calls host are re-aligned against the index given here, and those
-# Bowtie2 cannot place on the host are kept. Supplying the index is what
-# enables the pass; omit the flag to skip it.
+# AUTO mode with the Bowtie2 verification pass: Kraken2 removes the host bulk,
+# then the reads it retained are re-screened against the index given here.
+# Supplying the index is what enables the pass; omit the flag to skip it.
 rustyclean --r1 sample.fastq.gz \
            --host-removal-mode auto \
            --kraken2-db /path/to/kraken2_db \
@@ -200,8 +178,10 @@ rustyclean --r1 sample.fastq.gz \
 
 # Batch mode with sample list
 rustyclean --samples list.txt \
-           --deacon-index /path/to/panhuman-1.k31w15.idx \
+           --host-removal-mode auto \
+           --kraken2-db /path/to/kraken2_db \
            --host-index /path/to/bowtie2_index_prefix \
+           --auto-survey \
            -o output/ -w 4 -t 8
 ```
 
@@ -229,8 +209,8 @@ Options:
       --r2 <R2>                        Reverse reads (R2) fastq(.gz) file (paired-end)
   -s, --samples <SAMPLES>              Sample list file (TSV)
   -o, --output <OUTPUT>                Output directory [default: rustyclean_output]
-      --host-removal-mode <MODE>       Host-removal backend: kraken2, minimap2, bowtie2, sylph,
-                                       centrifuge, deacon, auto [default: auto]
+      --host-removal-mode <MODE>       Host-removal backend: kraken2, minimap2, bowtie2,
+                                       centrifuge, auto [default: kraken2]
       --host-pct <PCT>                 Expected host contamination % (0-100); used by auto mode
       --auto-survey                    Enable lightweight survey for auto mode
       --auto-survey-nreads <N>         Reads to survey [default: 100000]
@@ -245,15 +225,10 @@ Options:
       --sylph-min-cov <FLOAT>          Minimum effective coverage for sylph host-positive call [default: 0.0005]
       --host-index <PATH>              Host index path (minimap2 .mmi, bowtie2 prefix,
                                        centrifuge prefix, sylph .syldb, or auto survey index)
-      --deacon-index <PATH>            Deacon minimizer index; required for `--host-removal-mode
-                                       deacon`, and enables deacon as Tier-1 backend in auto mode
-      --recheck-threshold <FLOAT>      Removed-proportion (0-1) triggering the auto-mode
-                                       bowtie2 recheck of deacon-retained reads [default: 0.3]
-      --no-recheck                     Disable the auto-mode bowtie2 recheck (fastp -> deacon only)
-      --bowtie2-recheck <PREFIX>       Kraken2 backend only: re-align the reads Kraken2 called
-                                       host against this Bowtie2 index and keep the ones that do
-                                       not map. Supplying the index enables the pass; omit the
-                                       flag to disable it. May differ from --host-index
+      --bowtie2-recheck <PREFIX>       Re-align the reads Kraken2 called host against this Bowtie2
+                                       index and drop any that map. Supplying the index enables
+                                       the pass; omit the flag to disable it. May differ from
+                                       --host-index
       --max-contamination <PCT>        Max allowed host contamination in output [default: 100.0]
       --skip-qc                        Skip fastp QC and use raw reads for host removal
   -c, --config <CONFIG>                Configuration file (TOML)
@@ -277,10 +252,6 @@ concurrent workers do not collectively exceed ~80% of available RAM. This
 prevents out-of-memory failures when many samples are processed in parallel on
 shared-memory nodes. You can override the cap by explicitly setting `-w`.
 
-All Bowtie2 invocations---including AUTO survey, depletion and recheck---pass
-`--mm`, so processes using the same read-only index can share its file-backed
-pages instead of loading private copies.
-
 ## Pipeline
 
 ### Default (QC + host removal)
@@ -295,7 +266,7 @@ Input FASTQ(.gz)
       |
       v
   +------------------+
-  | host-removal     |  deacon / kraken2 / bowtie2 / sylph / minimap2 / centrifuge / auto
+  | host-removal     |  kraken2 / bowtie2 / sylph / minimap2 / centrifuge / auto
   | (selected backend)
   +------------------+
       |
@@ -306,26 +277,6 @@ Input FASTQ(.gz)
   Clean FASTQ          {sample_id}_clean_R1.fastq.gz [+ _R2.fastq.gz]
 ```
 
-### AUTO mode with `--deacon-index` (recommended)
-
-```
-Input FASTQ(.gz)
-      |
-      v
-  fastp                QC (skipped with --skip-qc)
-      |
-      v
-  deacon filter -d     Minimizer-based host depletion (every sample)
-      |
-      +-- removed proportion < --recheck-threshold (0.3) --> deacon output is final
-      |
-      v  removed proportion >= 0.3
-  Bowtie2 recheck      Re-align deacon-retained reads; remove the ones that map
-      |
-      v
-  Validation --> Clean FASTQ
-```
-
 ### `--skip-qc` (host removal only)
 
 ```
@@ -333,7 +284,7 @@ Input FASTQ(.gz)
       |
       v
   +------------------+
-  | host-removal     |  deacon / kraken2 / bowtie2 / sylph / minimap2 / centrifuge / auto
+  | host-removal     |  kraken2 / bowtie2 / sylph / minimap2 / centrifuge / auto
   | (selected backend)
   +------------------+
       |
@@ -371,8 +322,6 @@ By default RustyClean writes per-sample checkpoints and intermediate files under
       fastp.json             # fastp QC report (absent when --skip-qc is used)
       trimmed_R1.fastq.gz    # fastp-trimmed reads (absent when --skip-qc is used)
       trimmed_R2.fastq.gz    # paired-end only
-      deacon_summary.json    # deacon summary, incl. seqs_removed_proportion (deacon/auto-deacon)
-      deacon_R1.fastq.gz     # deacon-retained reads before the recheck (auto-deacon only)
       kraken2.report         # Kraken2 report (kraken2/auto-kraken2 only)
       kraken2.output.txt     # Per-read Kraken2 classifications
       ...                    # Backend-specific intermediate files
@@ -382,8 +331,8 @@ By default RustyClean writes per-sample checkpoints and intermediate files under
 - Current pipeline stage (`Pending`, `FastpRunning`, `FastpComplete`, `Kraken2Running`, ...)
 - Input file hash (for resume consistency)
 - `fastp_metrics`: read counts, Q20/Q30, GC content, adapter trimming stats (when QC ran)
-- `kraken2_metrics` (all backends, despite the name): host reads removed, reads kept, host % of the reads entering host removal, output paths. Paired-end samples are counted in pairs
-- `auto_backend`: backend chosen by `auto` mode (`deacon`, `bowtie2` or `kraken2`)
+- `kraken2_metrics`: host reads kept, unclassified/kept reads, contamination %, output paths
+- `auto_backend`: backend chosen by `auto` mode (e.g. `bowtie2` or `kraken2`)
 - `validation_result`: pass/fail status, output file size, errors
 
 ### Log files

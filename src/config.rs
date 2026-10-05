@@ -110,20 +110,6 @@ pub enum HostRemovalConfig {
         db_path: PathBuf,
         threads: usize,
     },
-    #[serde(rename = "deacon")]
-    Deacon {
-        /// Deacon minimizer index built by `deacon index build`.
-        index_path: PathBuf,
-        threads: usize,
-        /// Absolute minimizer-hit threshold for a read to be treated as host
-        /// (depleted by `deacon filter -d`).
-        #[serde(default = "default_deacon_abs_threshold")]
-        abs_threshold: u32,
-        /// Relative minimizer-hit threshold (fraction of read minimizers that
-        /// must hit the index) for a read to be treated as host.
-        #[serde(default = "default_deacon_rel_threshold")]
-        rel_threshold: f64,
-    },
     #[serde(rename = "auto")]
     Auto {
         /// Sylph sketch database used for the default high-host branch.
@@ -164,15 +150,6 @@ pub enum HostRemovalConfig {
         /// when the auto backend resolves to kraken2.
         #[serde(default)]
         bowtie2_recheck: bool,
-        /// Deacon minimizer index. When set (and the file exists), auto mode
-        /// runs deacon as the Tier-1 backend for every sample instead of
-        /// routing between kraken2/bowtie2/sylph.
-        #[serde(default)]
-        deacon_index_path: Option<PathBuf>,
-        /// Removed-read proportion (0-1) from deacon's summary JSON at or above
-        /// which the deacon-retained reads are re-aligned with Bowtie2.
-        #[serde(default = "default_recheck_threshold")]
-        recheck_threshold: f64,
     },
 }
 
@@ -184,7 +161,6 @@ impl HostRemovalConfig {
             HostRemovalConfig::Bowtie2 { .. } => "bowtie2",
             HostRemovalConfig::Sylph { .. } => "sylph",
             HostRemovalConfig::Centrifuge { .. } => "centrifuge",
-            HostRemovalConfig::Deacon { .. } => "deacon",
             HostRemovalConfig::Auto { .. } => "auto",
         }
     }
@@ -196,7 +172,6 @@ impl HostRemovalConfig {
             HostRemovalConfig::Bowtie2 { .. } => "bowtie2",
             HostRemovalConfig::Sylph { .. } => "sylph",
             HostRemovalConfig::Centrifuge { .. } => "centrifuge",
-            HostRemovalConfig::Deacon { .. } => "deacon",
             HostRemovalConfig::Auto { .. } => "auto-unresolved",
         }
     }
@@ -208,22 +183,9 @@ impl HostRemovalConfig {
             HostRemovalConfig::Bowtie2 { threads, .. } => *threads,
             HostRemovalConfig::Sylph { threads, .. } => *threads,
             HostRemovalConfig::Centrifuge { threads, .. } => *threads,
-            HostRemovalConfig::Deacon { threads, .. } => *threads,
             HostRemovalConfig::Auto { threads, .. } => *threads,
         }
     }
-}
-
-pub(crate) fn default_deacon_abs_threshold() -> u32 {
-    2
-}
-
-pub(crate) fn default_deacon_rel_threshold() -> f64 {
-    0.01
-}
-
-pub(crate) fn default_recheck_threshold() -> f64 {
-    0.3
 }
 
 fn default_memory_mapping() -> bool {
